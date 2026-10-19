@@ -38,6 +38,7 @@ class TPoints:
         self.fidx: int = 0
         self.btnsize: int = 30
         self.toggled: bool = True
+        self.view = None  # ViewTransform, set by the app so points follow zoom and pan
 
         # self.bin_button = BinButton(canvas, command=self.removept, size=self.btnsize)
 
@@ -120,7 +121,7 @@ class TPoints:
                 tpt = tpts[idx]
 
                 color = self._color(idx, startidx)
-                tpt.draw(self.canvas, color=color)
+                tpt.draw(self.canvas, color=color, view=self.view)
 
                 self.selectpoints.currpts.append([tpt.cpt, i, self.fidx])
 

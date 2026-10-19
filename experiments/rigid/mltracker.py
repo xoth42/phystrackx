@@ -11,6 +11,7 @@ import cv2
 import logging
 import os
 from core import abspath, PixelRect
+from .modelfiles import ensure_models
 
 class MLTracker:
     """Manages deep learning template tracking using lightweight ONNX models."""
@@ -39,9 +40,9 @@ class MLTracker:
         """
         if self.tracking_type == "nanotrack":
 
+            ensure_models(["models/nanotrack_backbone.onnx", "models/nanotrack_head.onnx"])
             param_path = abspath("models/nanotrack_backbone.onnx")
             model_path = abspath("models/nanotrack_head.onnx")
-            self._require_models([param_path, model_path])
 
             params = cv2.TrackerNano_Params()
             params.backbone = param_path

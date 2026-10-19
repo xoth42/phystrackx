@@ -46,6 +46,12 @@ class Experiment:
         self.trimpath: str = trimpath
         self.active_duration: list[int] = []
 
+        # The original file, the display proxy's size and frame count, and the full-resolution copy
+        self.sourcepath: str | None = None
+        self.proxysize: tuple[int, int] | None = None
+        self.proxyfcount: int = 0
+        self.nativepath: str | None = None
+
         self.logger = logging.getLogger(__name__)
 
     # ---------------------------------------------------------------------------------------------
@@ -65,6 +71,8 @@ class Experiment:
             on_progress (callable, optional): Receives proxy encoding progress (0.0 to 1.0).
         """
         self.videopath = videopath
+        if not istrim:
+            self.sourcepath = videopath
         self._vidreader = VideoReader(videopath)
         self.fwidth = self._vidreader.width
         self.fheight = self._vidreader.height
@@ -123,17 +131,44 @@ class Experiment:
         self.fheight = self._vidreader.height
         self.fcount = self._vidreader.fcount
         self.fps = self._vidreader.fps
+        self.proxysize = (self.fwidth, self.fheight)
+        self.proxyfcount = self.fcount
 
     # ---------------------------------------------------------------------------------------------
-    def trim(self, startidx: int = 0, endidx: int = 0) -> None:
+    def ensure_native(self, on_progress=None) -> str:
+        """
+        Make, or reuse, a copy of the source at its full size, with rotation applied. Its frames
+        match the proxy's one for one, so a frame index means the same moment in both.
+
+        Args:
+            on_progress (callable, optional): Receives encoding progress (0.0 to 1.0).
+
+        Returns:
+            str: Path to the full-resolution copy.
+        """
+        if not self.sourcepath:
+            raise RuntimeError("No source video to make a full-resolution copy from.")
+        # iw and ih are the source size after rotation, so the copy keeps the source's size
+        native = proxyvideo(self.sourcepath, width="trunc(iw/2)*2", height="trunc(ih/2)*2",
+                            on_progress=on_progress, total_frames=self.proxyfcount)
+        if native is None:
+            raise IOError(f"Could not create a full-resolution copy of: {self.sourcepath}")
+        self.nativepath = native
+        return native
+
+    # ---------------------------------------------------------------------------------------------
+    def trim(self, startidx: int = 0, endidx: int = 0, crop=None) -> bool:
         """
         Trim the video between specified frame indices using FFmpeg.
 
         Args:
             startidx (int): Starting frame index.
             endidx (int): Ending frame index.
+
+        Returns:
+            bool: True if the trimmed clip was written. On False the old clip is untouched.
         """
-        trimvideo(self.videopath, self.trimpath, startidx, endidx, self.fps)
+        return trimvideo(self.videopath, self.trimpath, startidx, endidx, self.fps, crop=crop)
 
     # ---------------------------------------------------------------------------------------------
     def frame(self, index: int | None = None) -> MatLike:

@@ -15,7 +15,8 @@ class Checkbox(ctk.CTkToplevel):
     A modal popup that displays checkboxes for each Enum option
     and passes selected options to a callback on confirmation.
     """
-    def __init__(self, parent: ctk.CTk, options: Enum, text="Choose", callback=None):
+    def __init__(self, parent: ctk.CTk, options: Enum, text="Choose", callback=None,
+                 defaults=None):
         super().__init__(parent)
         self.title("Select Options")
         self.geometry("480x280")
@@ -32,17 +33,18 @@ class Checkbox(ctk.CTkToplevel):
         self.grid_frame = ctk.CTkFrame(self, fg_color="transparent")
         self.grid_frame.pack(padx=20, pady=10)
 
-        self._populate_options(options)
+        self._populate_options(options, defaults=defaults)
 
         ctk.CTkButton(self, text="✓ Apply", command=self.onapply,
                       width=120).pack(pady=15)
 
-    def _populate_options(self, options: Enum, cols: int = 3):
+    def _populate_options(self, options: Enum, cols: int = 3, defaults=None):
         """
-        Add Enum options as checkboxes in a grid layout.
+        Add Enum options as checkboxes in a grid layout. Options in defaults start selected.
         """
+        defaults = set(defaults or ())
         for idx, option in enumerate(options):
-            var = ctk.BooleanVar()
+            var = ctk.BooleanVar(value=option in defaults)
             cb = ctk.CTkCheckBox(self.grid_frame, text=option.name, variable=var)
             row, col = divmod(idx, cols)
             cb.grid(row=row, column=col, padx=15, pady=10, sticky="w")

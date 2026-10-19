@@ -11,6 +11,7 @@ from enum import Enum, auto
 class PlotType(Enum):
     X = auto()     # Position along x-axis vs time
     Y = auto()     # Position along y-axis vs time
+    R = auto()     # Distance from the axes origin vs time
     XY = auto()    # Trajectory (x vs y)
     DX = auto()    # First derivative (velocity) along x
     DY = auto()    # First derivative (velocity) along y

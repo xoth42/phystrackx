@@ -48,6 +48,9 @@ class ScaleRuler:
         # Calibration States
         self.scale: float = 1.0
         self.real_world_length: Optional[float] = None
+        self.placed = False  # True once the user has shown the ruler
+        self.view = None  # ViewTransform, set by the app so the ruler follows zoom and pan
+        self.on_apply = None  # Optional callback after Apply (used to leave marking mode)
         self.dragging: Optional[str] = None
         self.offset = [0, 0]
 
@@ -81,8 +84,26 @@ class ScaleRuler:
         return hypot(x - (x1 + t * dx), y - (y1 + t * dy))
 
     # ---------------------------------------------------------------------------------------------
+    def get_state(self) -> dict:
+        """Ruler endpoints in canvas pixels, plus the calibrated length."""
+        return {"p1": list(self.p1), "p2": list(self.p2),
+                "real_world_length": self.real_world_length,
+                "canvas": [self.vwidth, self.vheight]}
+
+    def restore_state(self, state: dict) -> None:
+        """Re-places the ruler and its calibration, scaling if the window size has changed."""
+        sx = self.vwidth / state["canvas"][0]
+        sy = self.vheight / state["canvas"][1]
+        self.p1 = [state["p1"][0] * sx, state["p1"][1] * sy]
+        self.p2 = [state["p2"][0] * sx, state["p2"][1] * sy]
+        self.real_world_length = state["real_world_length"]
+        self.placed = True
+        self._sync_angle()
+        self.draw()
+
     def pack(self) -> None:
         """Maps canvas interaction hooks and locks outer UI layout states."""
+        self.placed = True
         self._sync_angle()
         self.angle.show(before=self.canvas)
         self.draw()
@@ -124,6 +145,8 @@ class ScaleRuler:
             btn.configure(state="normal")
 
         self.clear()
+        if self.on_apply:
+            self.on_apply()
 
     def rotate_to(self, theta_deg: float) -> None:
         """Turns the ruler to `theta_deg` about its midpoint, keeping its length."""
@@ -139,17 +162,26 @@ class ScaleRuler:
         """Called by the angle bar and text box."""
         self.rotate_to(self.theta.get())
 
+    def _screen(self, p) -> tuple[float, float]:
+        """Unzoomed (stored) point -> on-screen canvas point."""
+        return self.view.to_canvas(p[0], p[1]) if self.view is not None else (p[0], p[1])
+
+    def _base(self, x: float, y: float) -> tuple[float, float]:
+        """On-screen canvas point -> unzoomed (stored) point."""
+        return self.view.to_base(x, y) if self.view is not None else (x, y)
+
     def draw(self) -> None:
         """Re-renders complete scalar wire structures across pixel transforms."""
         self.canvas.delete(self.RULER_TAG)  # Now clears ONLY lines/text, keeps button safe!
-        x1, y1 = self.p1
-        x2, y2 = self.p2
-        pixels = self._length()
-        if pixels == 0:
+        x1, y1 = self._screen(self.p1)
+        x2, y2 = self._screen(self.p2)
+        pixels = self._length()  # Calibration uses unzoomed frame pixels
+        screen_len = hypot(x2 - x1, y2 - y1)
+        if pixels == 0 or screen_len == 0:
             return
 
         # Unit vectors along the ruler (u) and across it, pointing "down" for a horizontal ruler (v)
-        ux, uy = (x2 - x1) / pixels, (y2 - y1) / pixels
+        ux, uy = (x2 - x1) / screen_len, (y2 - y1) / screen_len
         vx, vy = -uy, ux
         h2 = self.height / 2
 
@@ -164,7 +196,7 @@ class ScaleRuler:
                                    tags=self.RULER_TAG)
 
         # Segment Matrix Renders (Ticks)
-        if pixels > 50:
+        if screen_len > 50:
             for i in range(11):
                 t = i / 10
                 tx = x1 + (x2 - x1) * t
@@ -180,7 +212,7 @@ class ScaleRuler:
             display_text = f"{self.scale * pixels:.2f} units"
 
         # Metric Core String Data Overlay, placed above the ruler
-        mx, my = self._midpoint()
+        mx, my = (x1 + x2) / 2, (y1 + y2) / 2
         self.canvas.create_text(
             mx - 25 * vx, my - 25 * vy,
             text=display_text, font=self.FONT_LABEL,
@@ -188,7 +220,7 @@ class ScaleRuler:
         )
 
         # Polished Grab Interactive Handle Elements
-        for x, y in (self.p1, self.p2):
+        for x, y in ((x1, y1), (x2, y2)):
             self.canvas.create_rectangle(
                 x - self.handle_size, y - self.handle_size, x + self.handle_size, y + self.handle_size,
                 fill=self.COLOR_HANDLE, outline="white", tags=self.RULER_TAG
@@ -212,29 +244,32 @@ class ScaleRuler:
 
     def onclick(self, event: Any) -> None:
         """Determines context target selection positions upon click events."""
-        x, y = event.x, event.y
+        x, y = self._base(event.x, event.y)
+        zoom = self.view.zoom if self.view is not None else 1.0
+        tolerance = self.HIT_BOX_TOLERANCE / zoom  # Keep the grab area the same size on screen
 
-        if hypot(x - self.p1[0], y - self.p1[1]) < self.HIT_BOX_TOLERANCE:
+        if hypot(x - self.p1[0], y - self.p1[1]) < tolerance:
             self.dragging = "resize1"
-        elif hypot(x - self.p2[0], y - self.p2[1]) < self.HIT_BOX_TOLERANCE:
+        elif hypot(x - self.p2[0], y - self.p2[1]) < tolerance:
             self.dragging = "resize2"
-        elif self._distance_to_segment(x, y) < self.height / 2 + 4:
+        elif self._distance_to_segment(x, y) < (self.height / 2 + 4) / zoom:
             self.dragging = "move"
             mx, my = self._midpoint()
             self.offset = [x - mx, y - my]
 
     def ondrag(self, event: Any) -> None:
         """Moves the grabbed end (or the whole ruler) freely. Ends never snap to each other."""
+        x, y = self._base(event.x, event.y)
         if self.dragging == "resize1":
-            if hypot(self.p2[0] - event.x, self.p2[1] - event.y) >= self.MIN_RULER_LENGTH_PX:
-                self.p1 = [event.x, event.y]
+            if hypot(self.p2[0] - x, self.p2[1] - y) >= self.MIN_RULER_LENGTH_PX:
+                self.p1 = [x, y]
         elif self.dragging == "resize2":
-            if hypot(event.x - self.p1[0], event.y - self.p1[1]) >= self.MIN_RULER_LENGTH_PX:
-                self.p2 = [event.x, event.y]
+            if hypot(x - self.p1[0], y - self.p1[1]) >= self.MIN_RULER_LENGTH_PX:
+                self.p2 = [x, y]
         elif self.dragging == "move":
             mx, my = self._midpoint()
-            dx = event.x - self.offset[0] - mx
-            dy = event.y - self.offset[1] - my
+            dx = x - self.offset[0] - mx
+            dy = y - self.offset[1] - my
             self.p1 = [self.p1[0] + dx, self.p1[1] + dy]
             self.p2 = [self.p2[0] + dx, self.p2[1] + dy]
 

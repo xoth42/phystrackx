@@ -8,14 +8,22 @@ Author: Isam Balghari
 """
 
 import logging
+import os
 import queue
 import threading
-from tkinter import messagebox
+from tkinter import BooleanVar, filedialog, messagebox
 
 import cv2
+import customtkinter as ctk
 from PIL import Image, ImageTk
 
+from core import PixelRect, NormalizedRect
+from core import session
+from gui.components.plot.csvdata import load_csv
+from core.project import PROJECT_EXTENSION, new_project, read_project, write_project
 from gui.app import App
+from gui.components.view import ViewTransform
+from gui.components.viewcontrols import ViewControls
 
 # Component imports
 from gui.components.spinner import Spinner
@@ -50,8 +58,10 @@ class _LoadProgress:
 class RigidApp(App):
     """Main GUI application class for the PhysTrack Rigid tool."""
     
-    def __init__(self, root, videopath: str | None = None) -> None:
+    def __init__(self, root, videopath: str | None = None, projectpath: str | None = None) -> None:
         super().__init__(root)
+        self.projectpath: str | None = None
+        self.trim_range: dict | None = None
         
         # Initialize component-specific logging namespace
         self.logger = logging.getLogger(__name__)
@@ -60,6 +70,9 @@ class RigidApp(App):
         # 1. Instantiate Structural Sub-Managers
         self.plugin_mgr = PluginManager(self)
         self.pipeline_mgr = DataPipelineManager(self.videoview)
+        self.saved_data: dict | None = None  # {"dir": folder, "files": [CSV paths]} once saved
+        self.loaded_data = None  # CsvData read from the project's last saved CSV
+        self.pipeline_mgr.saver.on_saved = self._on_data_saved
         self.seekbar = SeekBar(self.vidframe, self.vwidth, self.seekbarh, callback=self.updateframe)
         self.seekbar.set_trim_callback(self.trimvideo)
 
@@ -83,6 +96,53 @@ class RigidApp(App):
         self.videoapp = Video(self.videoview, self.vwidth, self.vheight, self.plugin_mgr.crop,
                               self.plugin_mgr.filters)
 
+        # Zoom and pan: every overlay shares one view, so they all follow the picture
+        self.view = ViewTransform()
+        self.track_rects.view = self.view
+        self.ocrrects.view = self.view
+        self.tpoints.view = self.view
+        self.axes.view = self.view
+        self.scruler.view = self.view
+        self.track_rects.on_apply = self._leave_marking
+        self.ocrrects.on_apply = self._leave_marking
+        self.axes.on_apply = self._leave_marking
+        self.axes.on_cancel = self._leave_marking
+        self.scruler.on_apply = self._leave_marking
+        self.viewcontrols = ViewControls(self.vidframe, self.view, on_change=self._on_view_change,
+                                         on_shape=self._on_shape)
+
+        # Crop step of the trim tool: crops the trimmed clip, not just the display
+        self.cropstrip = ctk.CTkFrame(self.vidframe, fg_color="transparent")
+        self.cropstatus = ctk.CTkLabel(self.cropstrip, text="", font=("Arial", 14, "bold"))
+        self.cropstatus.pack(side="left", padx=10)
+        ctk.CTkButton(self.cropstrip, text="Crop Region", width=110,
+                      command=self._start_trim_crop).pack(side="left", padx=5)
+        ctk.CTkButton(self.cropstrip, text="Clear Crop", width=100,
+                      command=self._clear_trim_crop).pack(side="left", padx=5)
+        # Tracking reads the full-size source, so measurements are not limited by the window's size
+        self.fullres_var = BooleanVar(value=True)
+        ctk.CTkCheckBox(self.cropstrip, text="Full resolution", variable=self.fullres_var).pack(
+            side="left", padx=15)
+        self.plugin_mgr.crop.on_apply = self._update_crop_status
+
+        # Tracking screen: stop, manual correction of positions, and the zoom bars
+        self._live_on = False
+        self._live_frame = None
+        self._stop_requested = False
+        self.manual_mode = False
+        self._track_thread = None
+        self.trackstrip = ctk.CTkFrame(self.vidframe, fg_color="transparent")
+        self.trackstatus = ctk.CTkLabel(self.trackstrip, text="", font=("Arial", 14, "bold"))
+        self.trackstatus.pack(side="left", padx=10)
+        self.stopbtn = ctk.CTkButton(self.trackstrip, text="Stop", width=90, fg_color="#e03131",
+                                     hover_color="#c92a2a", command=self._request_stop)
+        self.stopbtn.pack(side="left", padx=5)
+        self.manualbtn = ctk.CTkButton(self.trackstrip, text="Manual Position: Off", width=190,
+                                       command=self._toggle_manual)
+        self.manualbtn.pack(side="left", padx=5)
+        ctk.CTkButton(self.trackstrip, text="Close", width=90,
+                      command=self._close_track_view).pack(side="left", padx=5)
+
         # Dynamic access alias configs
         # TODO: Abstract the button into plugin manager and remove this direct reference
         self.btnlist = self.plugin_mgr.btnlist
@@ -95,9 +155,24 @@ class RigidApp(App):
         self._ui_queue = queue.Queue()
         self._pump_ui_queue()
 
-        if videopath:
+        if projectpath:
+            self._open_project(projectpath)
+        elif videopath:
             self.videopath = videopath
+            self._create_project(videopath)
             self.loadvideo(videopath)
+
+    def _create_project(self, videopath: str) -> None:
+        """A video opened without a project gets a new project file in projects/, so Save writes
+        there and nothing is overwritten."""
+        try:
+            self.projectpath = new_project(videopath, canvas=(self.vwidth, self.vheight))
+        except OSError as e:
+            self.logger.exception("Could not create a project file")
+            messagebox.showerror("Project", f"Could not create a project file:\n{e}")
+            return
+        session.set_project(self.projectpath)
+        self.logger.info(f"New project: {self.projectpath}")
 
     def _ensure_video_loaded(self) -> bool:
         """Internal interceptor safeguarding core functions from uninitialized states."""
@@ -132,8 +207,14 @@ class RigidApp(App):
             fn()
         self.root.after(50, self._pump_ui_queue)
 
-    def loadvideo(self, videopath: str) -> None:
+    def loadvideo(self, videopath: str, on_done=None) -> None:
         self.logger.info(f"Asynchronous load requested for source asset: {videopath}")
+        if self._live_on:
+            messagebox.showinfo("Tracking", "Stop or finish tracking before loading another video.")
+            return
+        self.view.reset()
+        self.viewcontrols.hide()
+        self._leave_trim_mode()
         self.title = TitleBar(self.videoview, self.vwidth, "Video View")
         self.spinner = Spinner(self.videoview, self.videoapp.imgview)
 
@@ -145,10 +226,10 @@ class RigidApp(App):
         self.videoview.tag_raise(self.progressbar.bar)
         self.progressbar.update()
 
-        threading.Thread(target=self._load_in_background, args=(videopath, progress),
+        threading.Thread(target=self._load_in_background, args=(videopath, progress, on_done),
                          daemon=True).start()
 
-    def _load_in_background(self, videopath: str, progress: "_LoadProgress") -> None:
+    def _load_in_background(self, videopath: str, progress: "_LoadProgress", on_done=None) -> None:
         """Runs on a worker thread: shows a preview frame, then builds the proxy video."""
         try:
             frame = self._read_first_frame(videopath)
@@ -162,7 +243,7 @@ class RigidApp(App):
             return
 
         progress.set(100)
-        self._post_to_ui(self._finish_load)
+        self._post_to_ui(lambda: self._finish_load(on_done))
 
     def _read_first_frame(self, videopath: str):
         """Reads the first frame of the source file. Seeking the original is fast, so this previews
@@ -182,32 +263,110 @@ class RigidApp(App):
         self.videoapp.canvas.itemconfig(self.videoapp.imgview, image=self._preview_img)
         self.videoapp.canvas.coords(self.videoapp.imgview, 0, 0)
 
-    def _finish_load(self) -> None:
+    def _finish_load(self, on_done=None) -> None:
         self.spinner.destroy()
         self.progressbar.destroy()
         self.loadcomponents()
         self.logger.info("Video streaming channel successfully integrated on UI thread.")
+        if on_done:
+            on_done()
 
     def _finish_failed_load(self, error: Exception) -> None:
         self.spinner.destroy()
         self.progressbar.destroy()
         messagebox.showerror("Error", f"Could not load the video:\n{error}")
 
-    def trimvideo(self, startidx: int, endidx: int) -> None:
+    def _current_crop_rect(self) -> tuple[int, int, int, int] | None:
+        """The crop chosen in the trim step as (x, y, w, h), with even sizes for the encoder."""
+        r = self.plugin_mgr.crop.croprect
+        if r is None:
+            return None
+        w, h = int(r.width) - int(r.width) % 2, int(r.height) - int(r.height) % 2
+        if w < 2 or h < 2:
+            return None
+        return int(r.xmin), int(r.ymin), w, h
+
+    def trimvideo(self, startidx: int, endidx: int, on_done=None, crop=None) -> None:
+        """Writes the trimmed (and optionally cropped) clip, then loads it.
+
+        Args:
+            crop (tuple, optional): (x, y, w, h) in proxy pixels. Defaults to the crop
+                selected in the trim step.
+        """
+        if self._live_on:
+            messagebox.showinfo("Tracking", "Stop or finish tracking before trimming.")
+            return
+        if crop is None:
+            crop = self._current_crop_rect()
         self.logger.info(f"Targeted video clipping operation initialized. Frame coordinates range:"
-                         f" [{startidx} -> {endidx}]")
+                         f" [{startidx} -> {endidx}]" + (f", crop {crop}" if crop else ""))
         self.spinner = Spinner(self.videoview, self.videoapp.imgview, self.plugin_mgr.crop)
-        
-        threading.Thread(target=lambda: [
-            self.videoapp.trimvideo(startidx, endidx),
-            self._post_to_ui(lambda: [
-                self.videoapp.loadvideo(self.videoapp.trimpath, True),
-                self.seekbar.set_mode(SeekMode.VIEW, self.videoapp.fcount),
-                self.loadcomponents(),
-                self.spinner.destroy(),
-                self.logger.info("Asynchronous video trimming execution completed.")
-            ])
-        ], daemon=True).start()
+
+        # A trim of an existing clip counts frames and crop offsets from that clip. Record the
+        # cumulative trim in full-video (proxy) terms, so reopening the project and full-resolution
+        # tracking both see one trim that gives the same clip.
+        base_start = self.videoapp.trimstart if self.videoapp.istrimmed else 0
+        base_crop = self.trim_range["crop"] if self.videoapp.istrimmed and self.trim_range else None
+        bx, by = (base_crop[0], base_crop[1]) if base_crop else (0, 0)
+        if crop:
+            cumcrop = [bx + crop[0], by + crop[1], crop[2], crop[3]]
+        else:
+            cumcrop = base_crop
+        cumstart = base_start + startidx
+        cumend = base_start + endidx
+
+        def finish():
+            self.trim_range = {"start": cumstart, "end": cumend,
+                               "crop": list(cumcrop) if cumcrop else None}
+            if crop:
+                # The trimmed clip is already cropped, so the crop must not be applied again;
+                # the clip itself is shown upscaled to fit the view
+                self.plugin_mgr.crop.croprect = None
+                self.plugin_mgr.crop.fitted = True
+                self.plugin_mgr.crop.set(crop[2], crop[3])
+            self.videoapp.set_trim_map(cumstart, (cumcrop[0], cumcrop[1]) if cumcrop else (0, 0))
+            self.videoapp.loadvideo(self.videoapp.trimpath, True)
+            self.seekbar.set_mode(SeekMode.VIEW, self.videoapp.fcount)
+            self.loadcomponents()
+            self.spinner.destroy()
+            self._leave_trim_mode()
+            self.logger.info("Asynchronous video trimming execution completed.")
+            if on_done:
+                on_done()
+
+        def fail():
+            self.spinner.destroy()
+            self.logger.error("Trim failed; the current clip is unchanged.")
+            messagebox.showerror("Trim", "Could not write the trimmed clip.\n"
+                                         "The current clip is unchanged.")
+
+        def work():
+            ok = self.videoapp.trimvideo(startidx, endidx, crop)
+            self._post_to_ui(finish if ok else fail)
+
+        threading.Thread(target=work, daemon=True).start()
+
+    def _enter_trim_mode(self) -> None:
+        self.cropstrip.pack(side="bottom", fill="x", before=self.videoview, pady=5)
+        self._update_crop_status()
+
+    def _leave_trim_mode(self) -> None:
+        self.cropstrip.pack_forget()
+
+    def _start_trim_crop(self) -> None:
+        self.plugin_mgr.crop.drawrect(None)
+
+    def _clear_trim_crop(self) -> None:
+        crop = self.plugin_mgr.crop
+        crop.clear()
+        crop.set(crop.fwidth, crop.fheight)  # Restore the full frame size
+        self.updateframe()
+        self._update_crop_status()
+
+    def _update_crop_status(self) -> None:
+        r = self.plugin_mgr.crop.croprect
+        text = f"Crop: {int(r.width)} x {int(r.height)} px" if r is not None else "Crop: full frame"
+        self.cropstatus.configure(text=text)
 
     def loadcomponents(self) -> None:
         self.seekbar.set_mode(SeekMode.VIEW, self.videoapp.fcount)
@@ -219,22 +378,61 @@ class RigidApp(App):
         if self._ensure_video_loaded():
             self.logger.info("Seeding timeline workspace frame navigation controls.")
             self.seekbar.set_mode(SeekMode.TRIM, self.videoapp.fcount)
+            self._enter_trim_mode()
 
     def updateframe(self) -> None:
+        # The tracker reads the video while it runs; the UI must not seek the same reader then
+        if self._live_on:
+            return
         # Note: Avoid high-frequency logger.info operations inside live frame renders. 
         # Scrubbing the timeline would write 60+ logs/second, causing disk I/O bottlenecks
         # and UI stutters.
-        self.videoapp.showframe(self.seekbar.idx)
+        crop = self.plugin_mgr.crop
+        self.view.origin = (crop.cropx, crop.cropy)
+        self.view.fit = crop.fit
+        self.videoapp.showframe(self.seekbar.idx, self.view)
         self.tpoints.drawpoints(self.seekbar.idx)
+
+    def _on_view_change(self) -> None:
+        """Zoom or pan changed: redraw the frame and every overlay at the new view."""
+        if self._live_on and self._live_frame is not None:
+            self._draw_live(*self._live_frame)  # Keep showing the tracked frame while it runs
+        else:
+            self.updateframe()
+        self.track_rects.refresh()
+        self.ocrrects.refresh()
+        if self.axes.placed:
+            self.axes.rotate()
+        if self.scruler.placed:
+            self.scruler.draw()
+
+    def _on_shape(self, shape: str) -> None:
+        self.track_rects.shape = shape
+
+    def _enter_marking(self, with_shape: bool = True) -> None:
+        """Shows the zoom and pan controls while marking. The shape choice applies to objects only."""
+        self.viewcontrols.show(before=self.videoview, with_shape=with_shape)
+        self.viewcontrols.sync()
+
+    def markaxes(self) -> None:
+        self._enter_marking(with_shape=False)
+        self.axes.markaxes()
+
+    def _leave_marking(self) -> None:
+        """Hides the controls once marking is applied. The zoom stays, so the next object can
+        be marked at the same zoom; use Reset View to return to the full frame."""
+        self.viewcontrols.hide()
 
     def scale(self) -> None:
         self.logger.info("Deploying coordinate scale rule overlay layer.")
+        self._enter_marking(with_shape=False)
         self.scruler.pack()
 
     def drawrect(self) -> None:
         if self._ensure_video_loaded() and self._ensure_video_trimmed():
             self.logger.info("Activating workspace item tracking validation boxes.")
             self.title = TitleBar(self.videoview, self.vwidth, "Mark Tool")
+            self._enter_marking()
             self.track_rects.drawrect(self.plugin_mgr.crop.cropwidth, self.plugin_mgr.crop.cropheight,
                                       self.plugin_mgr.crop.cropx, self.plugin_mgr.crop.cropy)
 
@@ -256,6 +454,7 @@ class RigidApp(App):
         if self._ensure_video_loaded():
             self.logger.info("Mapping optical text zone character digit capture constraints.")
             self.title = TitleBar(self.videoview, self.vwidth, "OCR Tool")
+            self._enter_marking()
             self.ocrrects.drawrect(self.plugin_mgr.crop.cropwidth, self.plugin_mgr.crop.cropheight,
                                    self.plugin_mgr.crop.cropx, self.plugin_mgr.crop.cropy)
             self.plugin_mgr.toggle()
@@ -273,9 +472,13 @@ class RigidApp(App):
             messagebox.showerror("Error", "No nodes mapped to track. Select regions first!")
             return
 
+        # Only one tracking run may read the video at a time; a second run corrupts the reader
+        if self._track_thread is not None and self._track_thread.is_alive():
+            self.logger.warning("Tracking is already running; ignoring the new Track request.")
+            return
+
         self.logger.info("Kicking off optical flow and analytical tracking loops thread.")
         self.title = TitleBar(self.videoview, self.vwidth, "Tracking")
-        self.axes.clear()
         self.track_rects.cleartkrects()
         self.ocrrects.cleartkrects()
         # self.processanim.pack()
@@ -283,13 +486,29 @@ class RigidApp(App):
         self.progressbar.progress = progress
         self.progressbar.pack()
 
-        threading.Thread(target=self._track_in_background, args=(progress,), daemon=True).start()
+        # Each processed frame is handed over as the newest "live" frame; the UI draws it on a timer
+        self._live_frame = None
+        self._live_on = True
+        self._poll_live()
+        self._stop_requested = False
+        self._enter_track_view()
+        # Read on the UI thread: Tk variables must not be touched from the worker thread
+        fullres = self.fullres_var.get()
+        if fullres:
+            self.trackstatus.configure(text="Preparing full-resolution copy...")
+        self._track_thread = threading.Thread(target=self._track_in_background,
+                                              args=(progress, fullres), daemon=True)
+        self._track_thread.start()
         self.progressbar.update()
 
-    def _track_in_background(self, progress: "_LoadProgress") -> None:
+    def _track_in_background(self, progress: "_LoadProgress", fullres: bool = False) -> None:
         """Runs on a worker thread. Failures are reported to the user instead of stalling the UI."""
         try:
-            self.videoapp.track(self.track_rects, self.ocrrects, progress)
+            self.videoapp.track(self.track_rects, self.ocrrects, progress,
+                                on_frame=self._on_tracked_frame,
+                                should_stop=lambda: self._stop_requested,
+                                fullres=fullres,
+                                on_tracking=lambda: self._post_to_ui(self._show_tracking_text))
         except Exception as e:
             self.logger.exception("Tracking failed")
             progress.set(100)
@@ -301,13 +520,128 @@ class RigidApp(App):
         progress.set(100)
         self._post_to_ui(self._finish_track)
 
+    def _on_tracked_frame(self, index: int, frame, boxes: list) -> None:
+        """Worker thread: keeps only the newest frame, so the UI never falls behind."""
+        self._live_frame = (index, frame, boxes)
+
+    def _poll_live(self) -> None:
+        """UI thread: shows the newest tracked frame and the ball positions found in it."""
+        if not self._live_on:
+            return
+        item = self._live_frame
+        if item is not None and item is not getattr(self, "_live_drawn", None):
+            self._live_drawn = item
+            self._draw_live(*item)
+        # About 10 refreshes a second: drawing every frame slows the tracker itself by about half
+        self.root.after(100, self._poll_live)
+
+    def _draw_live(self, index: int, frame, boxes: list) -> None:
+        self.videoapp.show_array(frame, self.view)
+        self.videoview.delete("live")
+        ox0, oy0 = self.view.origin
+        for box in boxes:
+            if box is None:
+                continue
+            x, y, w, h = box
+            x1, y1 = self.view.to_canvas(ox0 + x, oy0 + y)
+            x2, y2 = self.view.to_canvas(ox0 + x + w, oy0 + y + h)
+            self.videoview.create_rectangle(x1, y1, x2, y2, outline="yellow", width=2, tags="live")
+            cx, cy = (x1 + x2) / 2, (y1 + y2) / 2
+            self.videoview.create_oval(cx - 4, cy - 4, cx + 4, cy + 4, fill="magenta",
+                                       outline="black", tags="live")
+        self.videoview.create_text(10, 10, anchor="nw", text=f"Frame {index}", fill="white",
+                                   font=("Arial", 12, "bold"), tags="live")
+
+    def _stop_live(self) -> None:
+        self._live_on = False
+        self.videoview.delete("live")
+
+    def _enter_track_view(self) -> None:
+        """Shows the stop button and zoom bars for the tracking screen."""
+        self._set_manual(False)
+        self.trackstrip.pack(side="bottom", fill="x", before=self.videoview, pady=5)
+        self.viewcontrols.show(before=self.videoview, with_shape=False)
+        self.viewcontrols.sync()
+        self.stopbtn.configure(state="normal")
+        self.manualbtn.configure(state="disabled")
+        self.trackstatus.configure(text="Tracking...")
+
+    def _show_tracking_text(self) -> None:
+        """UI thread: the frames are being read now, after any full-resolution copy is ready."""
+        if self._live_on and not self._stop_requested:
+            self.trackstatus.configure(text="Tracking...")
+
+    def _request_stop(self) -> None:
+        if self._track_thread is None or not self._track_thread.is_alive():
+            return  # Tracking already finished
+        self._stop_requested = True
+        self.stopbtn.configure(state="disabled")
+        self.trackstatus.configure(text="Stopping...")
+
+    def _finish_track_view(self, stopped: bool) -> None:
+        """After tracking: the results can be corrected with manual positions."""
+        self.stopbtn.configure(state="disabled")
+        self.manualbtn.configure(state="normal")
+        last = self._live_frame[0] if self._live_frame else 0
+        self.trackstatus.configure(
+            text=f"Stopped at frame {last}; results so far" if stopped else "Tracking complete")
+
+    def _close_track_view(self) -> None:
+        self._set_manual(False)
+        self.trackstrip.pack_forget()
+        self.viewcontrols.hide()
+
+    def _toggle_manual(self) -> None:
+        self._set_manual(not self.manual_mode)
+
+    def _set_manual(self, on: bool) -> None:
+        """Manual mode: clicking the frame sets the object's position for the frame shown."""
+        self.manual_mode = on
+        self.manualbtn.configure(text=f"Manual Position: {'On' if on else 'Off'}")
+        if on:
+            self.videoview.bind("<Button-1>", self._on_manual_click)
+        else:
+            self.videoview.unbind("<Button-1>")
+
+    def _on_manual_click(self, event) -> None:
+        if not self.videoapp.trackpts:
+            return
+        ox0, oy0 = self.view.origin
+        bx, by = self.view.to_base(event.x, event.y)
+        px, py = bx - ox0, by - oy0  # Stored in frame pixels, like the tracker's output
+        idx = self.seekbar.idx
+        j = self._nearest_object(idx, px, py)
+        if j is None or idx >= len(self.videoapp.trackpts[j]):
+            return
+        self.videoapp.trackpts[j][idx] = [px, py]
+        self.tpoints.undrawpoints()
+        self.tpoints.addpoints(self.videoapp.trackpts, ox0, oy0)
+        self.updateframe()
+        self.logger.info(f"Manual position set: object {j}, frame {idx} -> ({px:.1f}, {py:.1f})")
+
+    def _nearest_object(self, idx: int, px: float, py: float) -> int | None:
+        """The object whose point on this frame is nearest the click (object 0 if none has one)."""
+        best, best_d = None, float("inf")
+        for j, pts in enumerate(self.videoapp.trackpts):
+            if idx < len(pts) and len(pts[idx]) == 2:
+                d = (pts[idx][0] - px) ** 2 + (pts[idx][1] - py) ** 2
+                if d < best_d:
+                    best, best_d = j, d
+        if best is None and self.videoapp.trackpts:
+            return 0
+        return best
+
     def _finish_track(self) -> None:
+        self._stop_live()
         self.progressbar.destroy()
         self.loadcomponents()
         self.logger.info("Background point tracking calculations wrapped cleanly.")
+        self._finish_track_view(self._stop_requested)
 
     def _finish_failed_track(self, error: Exception) -> None:
+        self._stop_live()
         self.progressbar.destroy()
+        self._close_track_view()
         messagebox.showerror("Tracking failed", str(error))
 
     def clearcomponents(self) -> None:
@@ -320,6 +654,8 @@ class RigidApp(App):
     def reset(self) -> None:
         self.logger.info("Resetting application workspace tracking layers back to default profiles.")
         self.clearcomponents()
+        self.trim_range = None
+        self.scruler.placed = False
         self.videoapp.trackpts.clear()
         self.ocrrects.clear()
         self.track_rects.clear()
@@ -337,9 +673,144 @@ class RigidApp(App):
         self.pipeline_mgr.compile_and_run(self, "plot")
 
     def savedata(self) -> None:
-        self.logger.info("Compiling active physical scalar tracking frames for spreadsheet generation.")
-        self.title = TitleBar(self.videoview, self.vwidth, "Save Data")
-        self.pipeline_mgr.compile_and_run(self, "save")
+        """Save button: writes the project, then exports data if there is any to export."""
+        if not self.videopath:
+            messagebox.showerror("Save project", "Load a video before saving.")
+            return
+
+        if not self.projectpath:
+            base = os.path.splitext(os.path.basename(self.videopath))[0]
+            path = filedialog.asksaveasfilename(
+                defaultextension=PROJECT_EXTENSION, initialfile=base + PROJECT_EXTENSION,
+                filetypes=[("PhysTrackX project", f"*{PROJECT_EXTENSION}")])
+            if not path:
+                return
+            self.projectpath = path
+            session.set_project(path)
+
+        try:
+            write_project(self.projectpath, self.project_state())
+        except OSError as e:
+            messagebox.showerror("Save project", f"Could not save the project:\n{e}")
+            return
+        self.logger.info(f"Project saved: {self.projectpath}")
+
+        if self.videoapp.trackpts or self.videoapp.ocrdata:
+            self.title = TitleBar(self.videoview, self.vwidth, "Save Data")
+            self.pipeline_mgr.compile_and_run(self, "save")
+        else:
+            messagebox.showinfo("Project saved", f"Saved project to:\n{self.projectpath}")
+
+    def _on_data_saved(self, path: str) -> None:
+        """A CSV was written: remember its folder (the next save starts there) and the file, and
+        update the project so it can be plotted again when reopened."""
+        files = list((self.saved_data or {}).get("files", []))
+        files.append(path)
+        self.saved_data = {"dir": os.path.dirname(path), "files": files}
+        if self.projectpath:
+            try:
+                write_project(self.projectpath, self.project_state())
+            except OSError as e:
+                messagebox.showerror("Save project", f"Could not update the project:\n{e}")
+        self.logger.info(f"Data saved to: {path}")
+
+    def _load_saved_data(self, data: dict | None) -> None:
+        """Pulls the project's last saved CSV in, so the data can be plotted, and starts the next
+        save in its folder."""
+        self.saved_data = data
+        if not data:
+            return
+        folder = data.get("dir")
+        if folder and os.path.isdir(folder):
+            self.pipeline_mgr.saver.default_dir = folder
+        existing = [f for f in data.get("files", []) if os.path.isfile(f)]
+        if not existing:
+            return
+        try:
+            self.loaded_data = load_csv(existing[-1])
+            self.logger.info(f"Loaded saved data: {existing[-1]}")
+        except (OSError, ValueError) as e:
+            self.logger.exception("Could not load the saved data")
+            messagebox.showinfo("Saved data", f"The project's saved data could not be read:\n{e}")
+
+    def project_state(self) -> dict:
+        """Everything needed to rebuild the current setup from the source video."""
+        crop = self.plugin_mgr.crop.croprect
+        return {
+            "video": os.path.abspath(self.videopath),
+            "canvas": [self.vwidth, self.vheight],
+            "trim": self.trim_range if self.seekbar.trimmed else None,
+            "crop": {"x": crop.xmin, "y": crop.ymin, "w": crop.width, "h": crop.height}
+                    if crop is not None else None,
+            "axes": self.axes.get_state() if self.axes.placed else None,
+            "scale": self.scruler.get_state() if self.scruler.placed else None,
+            "data": self.saved_data,
+            "rects": {
+                "track": [list(r.totuple()) for r in self.track_rects.rects],
+                "track_shapes": self.track_rects.shapes,
+                "ocr": [list(r.totuple()) for r in self.ocrrects.rects],
+            },
+        }
+
+    def _open_project(self, path: str) -> None:
+        """Loads a project file: video first, then trim, then the overlays."""
+        try:
+            state = read_project(path)
+        except (OSError, ValueError) as e:
+            messagebox.showerror("Open project", f"Could not open the project:\n{e}")
+            return
+
+        self.projectpath = path
+        session.set_project(path)
+        self._load_saved_data(state.get("data"))
+        self.videopath = state["video"]
+        if not os.path.isfile(self.videopath):
+            messagebox.showerror("Open project", f"The project's video was not found:\n{self.videopath}")
+            return
+
+        # Without a trim, the crop must be in place before the video loads (loading sizes the frame
+        # to it). With a trim, the trim applies its own crop, which is restored afterwards.
+        crop = state.get("crop")
+        if crop and not state.get("trim"):
+            self.plugin_mgr.crop.croprect = PixelRect(crop["x"], crop["y"], crop["w"], crop["h"])
+
+        self.logger.info(f"Opening project: {path}")
+        self.loadvideo(self.videopath, on_done=lambda: self._restore_project(state))
+
+    def _restore_project(self, state: dict) -> None:
+        trim = state.get("trim")
+        if trim:
+            trim_crop = tuple(trim["crop"]) if trim.get("crop") else None
+            self.trimvideo(trim["start"], trim["end"], on_done=lambda: self._apply_overlays(state),
+                           crop=trim_crop)
+        else:
+            self._apply_overlays(state)
+
+    def _apply_overlays(self, state: dict) -> None:
+        """Restores the crop, axes, scale, and rectangles once the video (and trim) are in place."""
+        if state.get("trim"):
+            self.seekbar.mark_trimmed()
+        saved_crop = state.get("crop")
+        if saved_crop:
+            crop = self.plugin_mgr.crop
+            crop.croprect = PixelRect(saved_crop["x"], saved_crop["y"], saved_crop["w"], saved_crop["h"])
+            crop.fitted = True
+            crop.set()
+        self.updateframe()
+
+        if state.get("axes"):
+            self.axes.restore_state(state["axes"])
+        if state.get("scale"):
+            self.scruler.restore_state(state["scale"])
+
+        crop = self.plugin_mgr.crop
+        rects = state.get("rects", {})
+        self.track_rects.restore([NormalizedRect(*r) for r in rects.get("track", [])],
+                                 crop.cropwidth, crop.cropheight, crop.cropx, crop.cropy,
+                                 shapes=rects.get("track_shapes"))
+        self.ocrrects.restore([NormalizedRect(*r) for r in rects.get("ocr", [])],
+                              crop.cropwidth, crop.cropheight, crop.cropx, crop.cropy)
+        self.logger.info("Project restored.")
 
     def plugins(self) -> None:
         self.title = TitleBar(self.videoview, self.vwidth, "Plugins")

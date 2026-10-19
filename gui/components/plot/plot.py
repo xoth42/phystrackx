@@ -8,10 +8,12 @@ Author: Isam Balghari
 
 import matplotlib.pyplot as plt
 import numpy as np
+from matplotlib.widgets import RadioButtons, RangeSlider
 
 from gui.components.checkbox import Checkbox
 from .plottype import PlotType
 from .datamanager import DataManager
+from .fit import DEFAULT_MODEL, MODELS, best_period, fit_model, peak_periods
 
 
 class Plot:
@@ -26,6 +28,7 @@ class Plot:
         """
         self.parent = parent
         self.datamanager: DataManager | None = None
+        self._widgets = []  # Range sliders must stay referenced, or their callbacks stop
         
         # Apply the visual plotting environment profile
         plt.style.use(theme)
@@ -57,6 +60,7 @@ class Plot:
         plot_map = {
             PlotType.X.name: self.plotx,
             PlotType.Y.name: self.ploty,
+            PlotType.R.name: self.plotr,
             PlotType.XY.name: self.plotxy,
             PlotType.DX.name: self.plotdx,
             PlotType.DY.name: self.plotdy,
@@ -82,16 +86,84 @@ class Plot:
         plt.xlim((xmin*0.90, xmax*1.10))  # Add a 10% margin for better visibility
         plt.ylim((ymin*0.90, ymax*1.10))  # Add a 10% margin for better visibility
         plt.plot(xdata, ydata, '.', color=color)
+        return plt.gca()
+
+    def _add_fit(self, ax, t, y) -> None:
+        """
+        Adds a range slider under a time series. Dragging it picks the part of the data to use;
+        the damped oscillator fit and the period estimates are then recomputed for that part.
+        """
+        fig = ax.figure
+        fig.subplots_adjust(bottom=0.25, left=0.25)
+        t = np.asarray(t, dtype=float)
+        y = np.asarray(y, dtype=float)
+        order = np.argsort(t)
+        t, y = t[order], y[order]
+        if len(t) < 2 or t[0] == t[-1]:
+            return
+
+        fit_line, = ax.plot([], [], '-', color='k', linewidth=2, label='fit')
+        info = ax.text(0.02, 0.98, "", transform=ax.transAxes, va="top", ha="left", fontsize=8,
+                       family="monospace", bbox=dict(boxstyle="round", facecolor="white", alpha=0.85))
+
+        slider_ax = fig.add_axes([0.25, 0.08, 0.6, 0.03])
+        slider = RangeSlider(slider_ax, "Range (s)", float(t[0]), float(t[-1]),
+                             valinit=(float(t[0]), float(t[-1])))
+
+        keys = list(MODELS)
+        radio_ax = fig.add_axes([0.01, 0.42, 0.2, 0.14], frameon=False)
+        radio_ax.set_title("Fit", fontsize=9, loc="left")
+        radio = RadioButtons(radio_ax, [MODELS[k].label for k in keys],
+                             active=keys.index(DEFAULT_MODEL))
+        for label in radio.labels:
+            label.set_fontsize(8)
+
+        last = {"fit": None}  # The previous fit starts the next one, so dragging stays smooth
+
+        def update(_=None):
+            lo, hi = slider.val
+            mask = (t >= lo) & (t <= hi)
+            tp, yp = t[mask], y[mask]
+            model = keys[radio.index_selected]
+            fit = fit_model(tp, yp, model, warm=last["fit"])
+            if fit.ok:
+                last["fit"] = fit
+            peaks = peak_periods(tp, yp)
+            period, perr, source = best_period(fit, peaks)
+
+            if fit.ok:
+                names = MODELS[fit.model].names
+                tt = tp - fit.t0
+                fit_line.set_data(tp, MODELS[fit.model].func(tt, *(fit.params[k] for k in names)))
+            else:
+                fit_line.set_data([], [])
+            info.set_text(_summary(fit, peaks, period, perr, source))
+            fig.canvas.draw_idle()
+
+        slider.on_changed(update)
+        radio.on_clicked(update)
+        update()
+        self._widgets.extend([slider, radio])
 
     def plotx(self):
         for k, tpts in enumerate(self.points):
-            self._plot(self.timestamps, tpts[:, 0], xlabel=r"$T(s)$", ylabel=r"$x$",
-                       title=f"[O-{k+1}] " + r"$x$ vs $T$", color='m')
+            ax = self._plot(self.timestamps, tpts[:, 0], xlabel=r"$T(s)$", ylabel=r"$x$",
+                            title=f"[O-{k+1}] " + r"$x$ vs $T$", color='m')
+            self._add_fit(ax, self.timestamps, tpts[:, 0])
 
     def ploty(self):
         for k, tpts in enumerate(self.points):
-            self._plot(self.timestamps, tpts[:, 1], xlabel=r"$T(s)$", ylabel=r"$y$",
-                       title=f"[O-{k+1}] " + r"$y$ vs $T$", color='m')
+            ax = self._plot(self.timestamps, tpts[:, 1], xlabel=r"$T(s)$", ylabel=r"$y$",
+                            title=f"[O-{k+1}] " + r"$y$ vs $T$", color='m')
+            self._add_fit(ax, self.timestamps, tpts[:, 1])
+
+    def plotr(self):
+        """Distance from the axes origin, r = sqrt(x^2 + y^2), against time, with the fit."""
+        for k, tpts in enumerate(self.points):
+            r = np.hypot(tpts[:, 0], tpts[:, 1])
+            ax = self._plot(self.timestamps, r, xlabel=r"$T(s)$", ylabel=r"$r$",
+                            title=f"[O-{k+1}] " + r"$r$ vs $T$", color='m')
+            self._add_fit(ax, self.timestamps, r)
 
     def plotxy(self):
         for k, tpts in enumerate(self.points):
@@ -123,6 +195,33 @@ class Plot:
             d2y_dt2 = np.gradient(dy_dt, self.timestamps)
             self._plot(self.timestamps, d2y_dt2, xlabel=r"$T(s)$", ylabel=r"$\frac{d^2y}{dt^2}$",
                        title=f"[O-{k+1}] " + r"$\frac{d^2y}{dt^2}$", color='b')
+
+
+def _summary(fit, peaks, period, perr, source) -> str:
+    """Text box for the fit parameters and period estimates."""
+    lines = []
+    if fit.ok:
+        p, e = fit.params, fit.errors
+        lines += [
+            f"A     = {p['A']:.3g} ± {e['A']:.2g}",
+            f"gamma = {p['gamma']:.3g} ± {e['gamma']:.2g} /s   tau = {fit.tau:.3g} s",
+            f"omega = {p['omega']:.4g} ± {e['omega']:.2g} rad/s",
+            f"phi   = {p['phi']:.3g} ± {e['phi']:.2g} rad",
+            f"C     = {p['C']:.4g} ± {e['C']:.2g}",
+        ] + ([f"m     = {p['m']:.4g} ± {e['m']:.2g} /s"] if "m" in p else []) + [
+            f"R²    = {fit.r2:.4f}",
+            f"T fit = {fit.period:.4g} ± {fit.period_err:.2g} s",
+        ]
+        if fit.message:
+            lines.append(fit.message)
+    else:
+        lines.append(fit.message)
+    if peaks.period == peaks.period:  # Not NaN
+        lines.append(f"T peaks = {peaks.period:.4g} ± {peaks.period_err:.2g} s "
+                     f"({peaks.n_maxima} max, {peaks.n_minima} min)")
+    if source is not None:
+        lines.append(f"Best T = {period:.4g} ± {perr:.2g} s  [{source}]")
+    return "\n".join(lines)
 
 
 def main():

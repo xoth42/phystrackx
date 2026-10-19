@@ -44,20 +44,22 @@ class FPoint:
         self.valid = valid
         self.cpt = None  # Canvas point ID
 
-    def draw(self, canvas, color='magenta'):
+    def draw(self, canvas, color='magenta', view=None):
         """
         Draw the point on the canvas if not already drawn.
 
         Args:
             canvas (CTkCanvas): The canvas to draw on.
+            view (ViewTransform, optional): Maps the stored (unzoomed) position to the screen.
         """
         if not self.valid:
             return
-        
+
         if self.cpt is not None:
             return
 
-        self.cpt = canvas.create_oval(self.x - 6, self.y - 6, self.x + 6, self.y + 6, fill=color,
+        x, y = view.to_canvas(self.x, self.y) if view is not None else (self.x, self.y)
+        self.cpt = canvas.create_oval(x - 6, y - 6, x + 6, y + 6, fill=color,
                                       outline='black', width=1, tags="points")
 
     def undraw(self, canvas):

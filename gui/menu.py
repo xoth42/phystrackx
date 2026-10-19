@@ -71,15 +71,18 @@ class AnimatedGIF(ctk.CTkLabel):
 class MenuScreen:
     """Main menu screen with animation and image button to launch PhysTrack Rigid."""
 
-    def __init__(self, skip_intro: bool = False, video_path: str | None = None):
+    def __init__(self, skip_intro: bool = False, video_path: str | None = None,
+                 project_path: str | None = None):
         """
         Args:
             skip_intro (bool): If True, skip the startup animation and music.
             video_path (str, optional): Video to load on startup. When set, the
                 start button is skipped and the Rigid app opens straight away.
+            project_path (str, optional): Project file to open on startup (implies auto-start).
         """
         self.video_path = video_path
-        self.auto_start = skip_intro or video_path is not None
+        self.project_path = project_path
+        self.auto_start = skip_intro or video_path is not None or project_path is not None
         self.root = ctk.CTk()
         self.root.title("PhysTrackX")
         
@@ -173,7 +176,7 @@ class MenuScreen:
 
     def _launch_rigid_app(self, _=None):
         self._clear_screen()
-        RigidApp(self.root, videopath=self.video_path)
+        RigidApp(self.root, videopath=self.video_path, projectpath=self.project_path)
 
     def _clear_screen(self):
         for widget in self.root.winfo_children():

@@ -15,10 +15,16 @@ from typing import Callable, Optional
 from core import find_ffmpeg
 
 
+# Encoding quality of the proxy. CRF 28 caused visible blocking around sharp colour edges.
+PROXY_VERSION = "crf18-v2"
+PROXY_CRF = "18"
+
+
 def _cache_key(videopath: str, width: int, height: int) -> str:
     """Short key that changes when the source file or the proxy size changes."""
     st = os.stat(videopath)
-    raw = f"{os.path.abspath(videopath)}|{st.st_size}|{st.st_mtime_ns}|{width}x{height}"
+    # PROXY_VERSION changes whenever the encoding settings change, so old proxies are re-made
+    raw = f"{PROXY_VERSION}|{os.path.abspath(videopath)}|{st.st_size}|{st.st_mtime_ns}|{width}x{height}"
     return hashlib.sha1(raw.encode()).hexdigest()[:10]
 
 
@@ -90,7 +96,7 @@ def proxyvideo(videopath: str, width: int = 1000, height: int = -2,
         "-vf", f"scale={resolution}",
         "-c:v", "libx264",
         "-preset", "veryfast",
-        "-crf", "28",
+        "-crf", PROXY_CRF,
         "-an", # Strips audio to speed up proxy generation
         partial
     ]

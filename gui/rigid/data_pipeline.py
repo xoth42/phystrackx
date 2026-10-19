@@ -30,6 +30,12 @@ class DataPipelineManager:
         """Centralized helper to check payload presence and fire analytical responses."""
         self.logger.info(f"Data compile request intercepted for action dispatcher pathway: [{action_type}]")
         
+        # Data saved with this project (no tracking this session): plot it from the CSV
+        if action_type == "plot" and not app.videoapp.trackpts and app.loaded_data is not None:
+            self.logger.info("Plotting the data saved with this project.")
+            self.plotter.activate(app.loaded_data)
+            return
+
         # 1. State Guard Check
         if not app.videoapp.trackpts and not app.videoapp.ocrdata:
             self.logger.warning(

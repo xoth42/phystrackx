@@ -58,6 +58,10 @@ class SeekBar:
         """
         return self.trim_seekbar.trimmed
 
+    def mark_trimmed(self) -> None:
+        """Marks the trim as applied, used when a saved project restores a trim."""
+        self.trim_seekbar.trimmed = True
+
     def set_mode(self, mode: SeekMode, frame_count: int) -> None:
         """
         Handles the structural layout shuffling and resets safely when modes change.
