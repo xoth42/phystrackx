@@ -100,12 +100,13 @@ class Video:
         """
         self.rigid.set(fwidth, fheight)
 
-    def loadvideo(self, videopath: str, istrim:bool=False) -> None:
+    def loadvideo(self, videopath: str, istrim:bool=False, on_progress=None) -> None:
         """
         Load a video from file or fallback to trimmed path.
 
         Args:
             videopath (str): Path to video file.
+            on_progress (callable, optional): Receives proxy encoding progress (0.0 to 1.0).
         """
         self.rigid.release()
 
@@ -117,8 +118,8 @@ class Video:
             self.rigid.addvideo(self.trimpath, istrim, self.crop.fwidth, self.crop.fheight)
             self.logger.info("Video added from: %s", self.trimpath)
         else:
-            self.rigid.addvideo(videopath)
-            self.logger.info("Video added from: %s", videopath)    
+            self.rigid.addvideo(videopath, on_progress=on_progress)
+            self.logger.info("Video added from: %s", videopath)
             self.crop.set(self.fwidth, self.fheight)
 
         self.logger.info(f"Video loaded: {videopath}, Frame count: {self.fcount}, FPS: {self.fps},"

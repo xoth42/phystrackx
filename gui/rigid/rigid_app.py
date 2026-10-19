@@ -8,8 +8,13 @@ Author: Isam Balghari
 """
 
 import logging
+import queue
 import threading
 from tkinter import messagebox
+
+import cv2
+from PIL import Image, ImageTk
+
 from gui.app import App
 
 # Component imports
@@ -28,10 +33,24 @@ from .plugins_manager import PluginManager
 from .data_pipeline import DataPipelineManager
 
 
+class _LoadProgress:
+    """Load progress (0 to 100) set from the loader thread and read by ProgressBar.update.
+    Keeps Tk variables off the worker thread."""
+
+    def __init__(self) -> None:
+        self._value = 0
+
+    def set(self, value: int) -> None:
+        self._value = value
+
+    def get(self) -> int:
+        return self._value
+
+
 class RigidApp(App):
     """Main GUI application class for the PhysTrack Rigid tool."""
     
-    def __init__(self, root) -> None:
+    def __init__(self, root, videopath: str | None = None) -> None:
         super().__init__(root)
         
         # Initialize component-specific logging namespace
@@ -73,6 +92,13 @@ class RigidApp(App):
         
         self.logger.info("RigidApp UI system fully mapped and operational.")
 
+        self._ui_queue = queue.Queue()
+        self._pump_ui_queue()
+
+        if videopath:
+            self.videopath = videopath
+            self.loadvideo(videopath)
+
     def _ensure_video_loaded(self) -> bool:
         """Internal interceptor safeguarding core functions from uninitialized states."""
         if self.videoapp.fcount < 10:
@@ -91,19 +117,81 @@ class RigidApp(App):
             return False
         return True
 
+    def _post_to_ui(self, fn) -> None:
+        """Queues a callable to run on the Tk main thread. Worker threads must never call Tk
+        directly (root.after included), or Tcl can crash."""
+        self._ui_queue.put(fn)
+
+    def _pump_ui_queue(self) -> None:
+        """Runs queued UI callables on the main thread and reschedules itself."""
+        while True:
+            try:
+                fn = self._ui_queue.get_nowait()
+            except queue.Empty:
+                break
+            fn()
+        self.root.after(50, self._pump_ui_queue)
+
     def loadvideo(self, videopath: str) -> None:
         self.logger.info(f"Asynchronous load requested for source asset: {videopath}")
         self.title = TitleBar(self.videoview, self.vwidth, "Video View")
         self.spinner = Spinner(self.videoview, self.videoapp.imgview)
-        
-        threading.Thread(target=lambda: [
-            self.videoapp.loadvideo(videopath),
-            self.root.after(0, lambda: [
-                self.spinner.destroy(), 
-                self.loadcomponents(),
-                self.logger.info("Video streaming channel successfully integrated on UI thread.")
-            ])
-        ], daemon=True).start()
+
+        # Progress is written by the loader thread and polled by the progress bar on the UI thread
+        progress = _LoadProgress()
+        self.progressbar.progress = progress
+        self.progressbar.pack()
+        self.videoview.tag_raise(self.progressbar.bholder)
+        self.videoview.tag_raise(self.progressbar.bar)
+        self.progressbar.update()
+
+        threading.Thread(target=self._load_in_background, args=(videopath, progress),
+                         daemon=True).start()
+
+    def _load_in_background(self, videopath: str, progress: "_LoadProgress") -> None:
+        """Runs on a worker thread: shows a preview frame, then builds the proxy video."""
+        try:
+            frame = self._read_first_frame(videopath)
+            if frame is not None:
+                self._post_to_ui(lambda: self._show_preview(frame))
+            self.videoapp.loadvideo(videopath, on_progress=lambda f: progress.set(int(f * 100)))
+        except Exception as e:
+            self.logger.exception(f"Failed to load video: {videopath}")
+            progress.set(100)
+            self._post_to_ui(lambda: self._finish_failed_load(e))
+            return
+
+        progress.set(100)
+        self._post_to_ui(self._finish_load)
+
+    def _read_first_frame(self, videopath: str):
+        """Reads the first frame of the source file. Seeking the original is fast, so this previews
+        the video while the proxy is still encoding."""
+        cap = cv2.VideoCapture(videopath, cv2.CAP_FFMPEG)
+        ok, frame = cap.read()
+        cap.release()
+        return frame if ok else None
+
+    def _show_preview(self, frame) -> None:
+        """Shows a frame scaled to fit the video view, until the proxy is ready."""
+        h, w = frame.shape[:2]
+        scale = min(self.vwidth / w, self.vheight / h)
+        size = (max(1, int(w * scale)), max(1, int(h * scale)))
+        img = Image.fromarray(cv2.cvtColor(cv2.resize(frame, size), cv2.COLOR_BGR2RGB))
+        self._preview_img = ImageTk.PhotoImage(image=img)
+        self.videoapp.canvas.itemconfig(self.videoapp.imgview, image=self._preview_img)
+        self.videoapp.canvas.coords(self.videoapp.imgview, 0, 0)
+
+    def _finish_load(self) -> None:
+        self.spinner.destroy()
+        self.progressbar.destroy()
+        self.loadcomponents()
+        self.logger.info("Video streaming channel successfully integrated on UI thread.")
+
+    def _finish_failed_load(self, error: Exception) -> None:
+        self.spinner.destroy()
+        self.progressbar.destroy()
+        messagebox.showerror("Error", f"Could not load the video:\n{error}")
 
     def trimvideo(self, startidx: int, endidx: int) -> None:
         self.logger.info(f"Targeted video clipping operation initialized. Frame coordinates range:"
@@ -112,7 +200,7 @@ class RigidApp(App):
         
         threading.Thread(target=lambda: [
             self.videoapp.trimvideo(startidx, endidx),
-            self.root.after(0, lambda: [
+            self._post_to_ui(lambda: [
                 self.videoapp.loadvideo(self.videoapp.trimpath, True),
                 self.seekbar.set_mode(SeekMode.VIEW, self.videoapp.fcount),
                 self.loadcomponents(),
@@ -191,18 +279,36 @@ class RigidApp(App):
         self.track_rects.cleartkrects()
         self.ocrrects.cleartkrects()
         # self.processanim.pack()
+        progress = _LoadProgress()
+        self.progressbar.progress = progress
         self.progressbar.pack()
 
-        threading.Thread(target=lambda: [
-            self.videoapp.track(self.track_rects, self.ocrrects, self.progressbar.progress),
-            self.root.after(0, lambda: [
-                # self.processanim.destroy(), 
-                self.progressbar.destroy(), 
-                self.loadcomponents(),
-                self.logger.info("Background point tracking calculations wrapped cleanly.")
-            ])
-        ], daemon=True).start()
+        threading.Thread(target=self._track_in_background, args=(progress,), daemon=True).start()
         self.progressbar.update()
+
+    def _track_in_background(self, progress: "_LoadProgress") -> None:
+        """Runs on a worker thread. Failures are reported to the user instead of stalling the UI."""
+        try:
+            self.videoapp.track(self.track_rects, self.ocrrects, progress)
+        except Exception as e:
+            self.logger.exception("Tracking failed")
+            progress.set(100)
+            # Python clears `e` when the except block ends, so the callback needs its own reference
+            error = e
+            self._post_to_ui(lambda: self._finish_failed_track(error))
+            return
+
+        progress.set(100)
+        self._post_to_ui(self._finish_track)
+
+    def _finish_track(self) -> None:
+        self.progressbar.destroy()
+        self.loadcomponents()
+        self.logger.info("Background point tracking calculations wrapped cleanly.")
+
+    def _finish_failed_track(self, error: Exception) -> None:
+        self.progressbar.destroy()
+        messagebox.showerror("Tracking failed", str(error))
 
     def clearcomponents(self) -> None:
         self.plugin_mgr.filters.clear()

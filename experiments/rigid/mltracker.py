@@ -20,6 +20,15 @@ class MLTracker:
         self.tracker = None
         self.tracking_type = tracking_type
         
+    @staticmethod
+    def _require_models(paths: list[str]) -> None:
+        """Fails with a readable message instead of OpenCV's ONNX parse error."""
+        missing = [os.path.relpath(p) for p in paths if not os.path.isfile(p)]
+        if missing:
+            raise FileNotFoundError(
+                "Tracking model files are missing: " + ", ".join(missing) +
+                ". Place them in the models folder next to phystrackx.py.")
+
     def initialize_tracker(self, initial_frame: cv2.Mat, rect: PixelRect) -> None:
         """
         Initializes the tracker using the user's manual bounding box.
@@ -29,10 +38,11 @@ class MLTracker:
             rect: A PixelRect object representing the bounding box.
         """
         if self.tracking_type == "nanotrack":
-            
+
             param_path = abspath("models/nanotrack_backbone.onnx")
             model_path = abspath("models/nanotrack_head.onnx")
-            
+            self._require_models([param_path, model_path])
+
             params = cv2.TrackerNano_Params()
             params.backbone = param_path
             params.neckhead = model_path
@@ -41,6 +51,7 @@ class MLTracker:
             
         elif self.tracking_type == "vittrack":
             param_path = abspath("models/vit_tracker_baseline.onnx")
+            self._require_models([param_path])
             params = cv2.TrackerVit_Params()
             params.net = param_path
             

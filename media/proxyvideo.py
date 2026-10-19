@@ -6,32 +6,39 @@ Generate a low-resolution proxy video for fast frame seeking.
 Author: Isam Balghari
 """
 
+import hashlib
+import logging
 import os
 import subprocess
-from typing import Optional
-import logging
+from typing import Callable, Optional
 
-from core import abspath
+from core import find_ffmpeg
 
-import os
-import platform
-import logging
-import subprocess
-from typing import Optional
-from core.path import abspath
 
-def proxyvideo(videopath: str, width: int = 1000, height: int = -2, 
-               writepath: Optional[str] = None, overwrite: bool = False) -> Optional[str]:
+def _cache_key(videopath: str, width: int, height: int) -> str:
+    """Short key that changes when the source file or the proxy size changes."""
+    st = os.stat(videopath)
+    raw = f"{os.path.abspath(videopath)}|{st.st_size}|{st.st_mtime_ns}|{width}x{height}"
+    return hashlib.sha1(raw.encode()).hexdigest()[:10]
+
+
+def proxyvideo(videopath: str, width: int = 1000, height: int = -2,
+               writepath: Optional[str] = None, overwrite: bool = False,
+               on_progress: Optional[Callable[[float], None]] = None,
+               total_frames: Optional[int] = None) -> Optional[str]:
     """
-    Create a low-resolution proxy video using ffmpeg. 
+    Create a low-resolution proxy video using ffmpeg.
     Automatically bakes in rotation metadata and outputs as a standard .mp4.
 
     Args:
         videopath: Path to the original high-res video.
         width: Target width for the proxy video (e.g., 1000).
         height: Target height (e.g., -2 preserves aspect ratio).
-        writepath: Optional output path. If None, auto-generated.
+        writepath: Optional output path. If None, auto-generated from the source
+            file and the target size.
         overwrite: Whether to overwrite an existing proxy video.
+        on_progress: Optional callback receiving the encoded fraction (0.0 to 1.0).
+        total_frames: Frame count of the source, needed for on_progress.
 
     Returns:
         Path to the generated proxy video or None if failed.
@@ -43,11 +50,12 @@ def proxyvideo(videopath: str, width: int = 1000, height: int = -2,
         return None
 
     # Force the proxy output to be an .mp4 container.
-    # This destroys the proprietary .MOV metadata and bakes the rotation 
+    # This destroys the proprietary .MOV metadata and bakes the rotation
     # directly into the physical pixels for OpenCV.
     if writepath is None:
         base, _ = os.path.splitext(os.path.basename(videopath))
-        writepath = os.path.join("./temp", f"{base}_proxy.mp4")
+        key = _cache_key(videopath, width, height)
+        writepath = os.path.join("./temp", f"{base}_{key}_proxy.mp4")
     else:
         # Ensure even a user-provided writepath ends in .mp4
         base, _ = os.path.splitext(writepath)
@@ -55,40 +63,62 @@ def proxyvideo(videopath: str, width: int = 1000, height: int = -2,
 
     if os.path.exists(writepath) and not overwrite:
         logger.info(f"Proxy already exists: {writepath}")
+        if on_progress:
+            on_progress(1.0)
         return writepath
 
-    os.makedirs(os.path.dirname(writepath), exist_ok=True)
+    os.makedirs(os.path.dirname(writepath) or ".", exist_ok=True)
 
-    # Cross-platform FFmpeg execution
-    if platform.system() == "Windows":
-        ffmpeg = abspath("ffmpeg/ffmpeg.exe")
-    else:
-        ffmpeg = abspath("ffmpeg/ffmpeg")
+    # Encode to a partial file and rename on success, so a cancelled or failed
+    # encode is never picked up later as a valid cached proxy.
+    partial = f"{os.path.splitext(writepath)[0]}.partial.mp4"
+
+    try:
+        ffmpeg = find_ffmpeg()
+    except FileNotFoundError as e:
+        logger.error(str(e))
+        return None
 
     resolution = f"{width}:{height}"
-    
+
     # By default, FFmpeg applies -autorotate before video filters.
     # So it will rotate the portrait video upright, THEN apply the scale filter.
+    # -progress pipe:1 writes machine-readable "frame=N" lines to stdout for the progress bar.
     command = [
-        ffmpeg, 
-        "-y" if overwrite else "-n", 
-        "-i", videopath, 
-        "-vf", f"scale={resolution}", 
-        "-c:v", "libx264", 
-        "-preset", "fast", 
-        "-crf", "28", 
+        ffmpeg, "-y", "-loglevel", "error", "-progress", "pipe:1", "-nostats",
+        "-i", videopath,
+        "-vf", f"scale={resolution}",
+        "-c:v", "libx264",
+        "-preset", "veryfast",
+        "-crf", "28",
         "-an", # Strips audio to speed up proxy generation
-        writepath
+        partial
     ]
 
     logger.info(f"Creating proxy video: {writepath}")
-    try:
-        # Add text=True to cleanly capture FFmpeg error logs
-        subprocess.run(command, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, check=True)
-        logger.info(f"Proxy created: {writepath}")
-        return writepath
-    except subprocess.CalledProcessError as e:
-        logger.error(f"FFmpeg failed with exit code {e.returncode}")
-        # This will now log the actual red text FFmpeg spits out if it crashes!
-        logger.error(f"FFmpeg Error Output:\n{e.stderr}") 
+    proc = subprocess.Popen(command, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+
+    for line in proc.stdout:
+        if on_progress and total_frames and line.startswith("frame="):
+            try:
+                done = int(line.split("=", 1)[1])
+            except ValueError:
+                continue
+            on_progress(min(done / total_frames, 1.0))
+
+    stderr = proc.stderr.read()
+    returncode = proc.wait()
+
+    if returncode != 0:
+        logger.error(f"FFmpeg failed with exit code {returncode}")
+        # This will log the actual error text FFmpeg prints if it crashes
+        logger.error(f"FFmpeg Error Output:\n{stderr}")
+        if os.path.exists(partial):
+            os.remove(partial)
         return None
+
+    os.replace(partial, writepath)
+    if on_progress:
+        on_progress(1.0)
+    logger.info(f"Proxy created: {writepath}")
+    return writepath

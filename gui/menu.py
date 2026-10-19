@@ -71,7 +71,15 @@ class AnimatedGIF(ctk.CTkLabel):
 class MenuScreen:
     """Main menu screen with animation and image button to launch PhysTrack Rigid."""
 
-    def __init__(self):
+    def __init__(self, skip_intro: bool = False, video_path: str | None = None):
+        """
+        Args:
+            skip_intro (bool): If True, skip the startup animation and music.
+            video_path (str, optional): Video to load on startup. When set, the
+                start button is skipped and the Rigid app opens straight away.
+        """
+        self.video_path = video_path
+        self.auto_start = skip_intro or video_path is not None
         self.root = ctk.CTk()
         self.root.title("PhysTrackX")
         
@@ -88,14 +96,25 @@ class MenuScreen:
         self.main_frame.pack(fill="both", expand=True)
         
 
+        if skip_intro:
+            self.root.after(0, self._on_intro_done)
+            return
+
         # === Background animation ===
         self.animated_bg = AnimatedGIF(
             master=self.main_frame,
             gif_path=abspath("assets/logos/frontpage.gif"),
             music_path=abspath("assets/logos/startup.mp3"),
-            on_end=self._show_start_button
+            on_end=self._on_intro_done
         )
         self.animated_bg.place(x=0, y=0, relwidth=1, relheight=1)
+
+    def _on_intro_done(self):
+        """Open the app directly when auto-starting, otherwise show the start button."""
+        if self.auto_start:
+            self._launch_rigid_app()
+        else:
+            self._show_start_button()
 
     def _show_start_button(self):
         """Display the start button after the GIF ends."""
@@ -152,9 +171,9 @@ class MenuScreen:
     def _hover_out(self, _):
         self.img_label.configure(image=self.tk_img_normal)
 
-    def _launch_rigid_app(self, _):
+    def _launch_rigid_app(self, _=None):
         self._clear_screen()
-        RigidApp(self.root)
+        RigidApp(self.root, videopath=self.video_path)
 
     def _clear_screen(self):
         for widget in self.root.winfo_children():

@@ -22,6 +22,7 @@ class Rect:
     OUTLINE_PENDING = "magenta"
     OUTLINE_APPLIED = "#2ecc71"
     LINE_WIDTH = 2
+    MIN_BOX_PX = 4  # Smaller drags are treated as clicks and not stored
     BIN_BUTTON_SIZE = 30
     APPLY_BUTTON_SIZE = 50
 
@@ -95,8 +96,15 @@ class Rect:
             self.canvas.coords(self._ctkbox, sx, sy, ex, ey)
             
         def onrelease(event):
+            # A click without a drag makes an empty box, which cannot be tracked. Discard it
+            # and keep drawing enabled.
+            sx, sy = self._rcoords
+            if abs(event.x - sx) < self.MIN_BOX_PX or abs(event.y - sy) < self.MIN_BOX_PX:
+                self.canvas.delete(self._ctkbox)
+                return
+
             self.canvas.itemconfig(self._ctkbox, outline=self.OUTLINE_PENDING)
-            
+
             self.canvas.unbind("<Button-1>")
             self.canvas.unbind("<B1-Motion>")
             self.canvas.unbind("<ButtonRelease-1>")

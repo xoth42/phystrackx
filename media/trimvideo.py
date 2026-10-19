@@ -7,12 +7,11 @@ Author: Isam Balghari
 """
 
 import os
-import platform
 import subprocess
 from typing import Optional
 import logging
 
-from core import abspath
+from core import find_ffmpeg
 
 def trimvideo(videopath: str, writepath: str, startidx: int, endidx: int, 
               fps: Optional[float] = None, overwrite: bool = True) -> bool:
@@ -45,10 +44,11 @@ def trimvideo(videopath: str, writepath: str, startidx: int, endidx: int,
         
     video_filter = f"trim=start_frame={startidx}:end_frame={endidx+1},setpts=PTS-STARTPTS"
 
-    if platform.system() == "Windows":
-        ffmpeg = abspath("ffmpeg/ffmpeg.exe")
-    else:
-        ffmpeg = "ffmpeg" # Assumes ffmpeg is in PATH on non-Windows systems
+    try:
+        ffmpeg = find_ffmpeg()
+    except FileNotFoundError as e:
+        logger.error(str(e))
+        return False
 
     command = [ffmpeg, "-y" if overwrite else "-n", "-i", videopath, "-vf", video_filter,
                writepath]

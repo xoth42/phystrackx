@@ -56,9 +56,13 @@ class Experiment:
             sys.stderr = open("logs/stderr.log", "a")
 
     # ---------------------------------------------------------------------------------------------
-    def addvideo(self, videopath: str, istrim=False, fwidth: int = 0, fheight: int = 0) -> None:
+    def addvideo(self, videopath: str, istrim=False, fwidth: int = 0, fheight: int = 0,
+                 on_progress=None) -> None:
         """
         Load the video and extract dimensions and frame count.
+
+        Args:
+            on_progress (callable, optional): Receives proxy encoding progress (0.0 to 1.0).
         """
         self.videopath = videopath
         self._vidreader = VideoReader(videopath)
@@ -73,7 +77,7 @@ class Experiment:
             self.logger.info(f"Setting custom frame dimensions: width={self.fwidth}, height={self.fheight}")
 
         if not istrim:
-            self.resize()
+            self.resize(on_progress)
 
     # ---------------------------------------------------------------------------------------------
     def setseek(self, index: int) -> None:
@@ -87,28 +91,32 @@ class Experiment:
             self._vidreader.seek(index)
 
     # ---------------------------------------------------------------------------------------------
-    def resize(self) -> None:
+    def resize(self, on_progress=None) -> None:
         """
         Resize dimensions to fit inside the viewer while maintaining aspect ratio.
         """
         ratio = self.fwidth / self.fheight
         self.fheight = self.vheight
         self.fwidth = floor(self.fheight * ratio)
-        
+
         # Width and height must be even for ffmpeg
         self.fwidth = floor(self.fwidth/2)*2
         self.fheight = floor(self.fheight/2)*2
 
         # Generate proxy video
-        self._proxymize()
+        self._proxymize(on_progress)
 
     # ---------------------------------------------------------------------------------------------
-    def _proxymize(self) -> None:
+    def _proxymize(self, on_progress=None) -> None:
         """
         Create a lower-resolution proxy video and update internal reader.
         """
         os.makedirs("./temp", exist_ok=True)
-        self.videopath = proxyvideo(self.videopath, width=self.fwidth, height=self.fheight)
+        proxy = proxyvideo(self.videopath, width=self.fwidth, height=self.fheight,
+                           on_progress=on_progress, total_frames=self.fcount)
+        if proxy is None:
+            raise IOError(f"Could not create a proxy video for: {self.videopath}")
+        self.videopath = proxy
         self._vidreader = VideoReader(self.videopath)
 
         self.fwidth = self._vidreader.width

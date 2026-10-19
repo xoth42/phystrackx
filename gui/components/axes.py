@@ -6,9 +6,9 @@ Defines the Axes class that manages coordinate transformations and GUI-based axi
 Author: Isam Balghari
 """
 
-from tkinter import ttk
 import numpy as np
 import customtkinter as ctk
+from .anglecontrol import AngleControl
 from .buttons import SubmitButton
 
 class Axes:
@@ -19,7 +19,7 @@ class Axes:
         self.vwidth = vwidth
         self.vheight = vheight
         self.theta = ctk.DoubleVar(value=0)
-        self.slider = None
+        self.angle = None
 
         self.ox = 0.0
         self.oy = float(self.vheight)
@@ -34,8 +34,8 @@ class Axes:
         self.theta.set(0)
         self.canvas.delete("axes")
 
-        if self.slider is not None:
-            self.slider.pack_forget()
+        if self.angle is not None:
+            self.angle.hide()
 
     def markaxes(self):
         """Enable interactive marking of axes with mouse events."""
@@ -120,13 +120,15 @@ class Axes:
 
         self.applybtn.pack(side="right", padx=10, pady=10, anchor="se")
 
-        self.slider = ttk.Scale(self.canvas, from_=0, to=180, orient="horizontal",
-                                variable=self.theta, command=self.rotate)
-        self.slider.pack(side="right", padx=10, pady=10, anchor="se")
+        # Strip below the video (not over it), so the picture stays visible
+        # Strip below the video (not over it), so the picture stays visible.
+        # The narrow bar gives fine control; the text box covers larger angles.
+        self.angle = AngleControl(self.root, self.theta, self.rotate)
+        self.angle.show(before=self.canvas)
 
     def onapply(self):
         """Finalize axis placement and restore other UI buttons."""
-        self.slider.pack_forget()
+        self.angle.hide()
         self.applybtn.pack_forget()
 
         for btn in self.btnlist.values():
