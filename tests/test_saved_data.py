@@ -116,10 +116,10 @@ def test_plot_works_from_the_loaded_csv():
     plot.datamanager = loaded
     plot._widgets = []
     plot.ploty()
-    ax = plt.gcf().axes[0]
+    texts = [tx for a in plt.gcf().axes for tx in a.texts]  # The results panel is beside the plot
     h.check("plot from the saved CSV draws its fit", any("T fit" in tx.get_text() or
                                                          "T peaks" in tx.get_text()
-                                                         for tx in ax.texts))
+                                                         for tx in texts))
     plt.close("all")
 
 

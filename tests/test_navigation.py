@@ -51,6 +51,10 @@ def test_title_shows_project_and_video():
     h.check("title starts with the app name", title.startswith("PhysTrackX"), title)
     h.check("title shows the project name", project in title, title)
     h.check("title shows the video file name", app.videopath.rsplit("/", 1)[-1] in title, title)
+    import os
+    h.check("the new project is saved next to the video",
+            os.path.dirname(app.projectpath) == os.path.dirname(os.path.abspath(app.videopath)),
+            app.projectpath)
 
 
 def test_trackpad_scroll_pans_in_both_directions():

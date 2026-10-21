@@ -275,10 +275,16 @@ class RigidApp(App):
         self.root.after_idle(redraw)
 
     def _create_project(self, videopath: str) -> None:
-        """A video opened without a project gets a new project file in projects/, so Save writes
-        there and nothing is overwritten."""
+        """A video opened without a project gets a new project file next to the video (or in
+        projects/ if that folder is read-only), so Save writes there and nothing is overwritten."""
         try:
-            self.projectpath = new_project(videopath, canvas=(self.vwidth, self.vheight))
+            # Next to the video, so a trial's files stay together; projects/ if that folder
+            # cannot be written to
+            try:
+                self.projectpath = new_project(videopath, canvas=(self.vwidth, self.vheight),
+                                               folder=os.path.dirname(os.path.abspath(videopath)))
+            except OSError:
+                self.projectpath = new_project(videopath, canvas=(self.vwidth, self.vheight))
         except OSError as e:
             self.logger.exception("Could not create a project file")
             messagebox.showerror("Project", f"Could not create a project file:\n{e}")
@@ -805,6 +811,11 @@ class RigidApp(App):
     def plot(self) -> None:
         self.logger.info("Requesting analytical kinematics plot data visualizations compilation.")
         self.title = TitleBar(self.videoview, self.vwidth, "Data Visualization")
+        # Save plot starts in the project's folder, and names files after the video
+        plotter = self.pipeline_mgr.plotter
+        plotter.save_dir = os.path.dirname(self.projectpath) if self.projectpath else None
+        plotter.save_prefix = (os.path.splitext(os.path.basename(self.videopath))[0]
+                               if self.videopath else "")
         self.pipeline_mgr.compile_and_run(self, "plot")
 
     def savedata(self) -> None:

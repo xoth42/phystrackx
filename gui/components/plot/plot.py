@@ -6,9 +6,13 @@ Responsible for plotting position and motion derivatives from processed data usi
 Author: Isam Balghari
 """
 
+import os
+import re
+from tkinter import filedialog
+
 import matplotlib.pyplot as plt
 import numpy as np
-from matplotlib.widgets import RadioButtons, RangeSlider
+from matplotlib.widgets import Button, RadioButtons, RangeSlider
 
 from gui.components.checkbox import Checkbox
 from .plottype import PlotType
@@ -95,8 +99,51 @@ class Plot:
         plt.xlim((xmin*0.90, xmax*1.10))  # Add a 10% margin for better visibility
         plt.ylim((ymin*0.90, ymax*1.10))  # Add a 10% margin for better visibility
         plt.plot(xdata, ydata, '.', color=color, label="data")
-        plt.legend(loc="best", fontsize=8)  # Placed automatically, away from the data
-        return plt.gca()
+        legend = plt.legend(loc="best", fontsize=8)  # Placed automatically, away from the data
+        legend.set_draggable(True)  # ...and the user can move it if it still covers something
+        ax = plt.gca()
+        self._add_save_button(ax.figure, title)
+        plt.sca(ax)  # Adding the button's axes made them current; the plot's axes come back
+        return ax
+
+    def _add_save_button(self, fig, title: str) -> None:
+        """A "Save plot" button in the figure's bottom-right corner."""
+        button_ax = fig.add_axes([0.84, 0.02, 0.14, 0.05])
+        button = Button(button_ax, "Save plot")
+        button.label.set_fontsize(9)
+        button.on_clicked(lambda _event: self.save_figure(fig, title))
+        self._widgets.append(button)
+
+    def save_figure(self, fig, title: str):
+        """
+        Asks where to save the plot (starting in the project's folder) and writes it there. The
+        buttons and sliders are left out of the image; the results panel is kept.
+
+        Returns:
+            The saved path, or None if the user cancelled.
+        """
+        prefix = getattr(self, "save_prefix", "") or ""
+        stem = re.sub(r"[^A-Za-z0-9]+", "_", title.replace("$", "")).strip("_") or "plot"
+        name = f"{prefix}_{stem}.png" if prefix else f"{stem}.png"
+        options = {"initialfile": name, "defaultextension": ".png",
+                   "filetypes": [("PNG image", "*.png"), ("PDF", "*.pdf"), ("SVG", "*.svg")]}
+        folder = getattr(self, "save_dir", None)
+        if folder and os.path.isdir(folder):
+            options["initialdir"] = folder
+        path = filedialog.asksaveasfilename(**options)
+        if not path:
+            return None
+        controls = [w.ax for w in self._widgets if getattr(w, "ax", None) is not None
+                    and w.ax.figure is fig]
+        for ax in controls:
+            ax.set_visible(False)
+        try:
+            fig.savefig(path, dpi=200, bbox_inches="tight")
+        finally:
+            for ax in controls:
+                ax.set_visible(True)
+            fig.canvas.draw_idle()
+        return path
 
     def _add_fit(self, ax, t, y) -> None:
         """
@@ -104,7 +151,10 @@ class Plot:
         the damped oscillator fit and the period estimates are then recomputed for that part.
         """
         fig = ax.figure
-        fig.subplots_adjust(bottom=0.25, left=0.25)
+        # Plot in the middle, fit choice on the left, results and legend in a panel on the right,
+        # so nothing covers the data
+        fig.set_size_inches(12, 6)
+        fig.subplots_adjust(left=0.22, right=0.62, bottom=0.25, top=0.9)
         t = np.asarray(t, dtype=float)
         y = np.asarray(y, dtype=float)
         order = np.argsort(t)
@@ -114,11 +164,18 @@ class Plot:
 
         fit_line, = ax.plot([], [], '-', color='k', linewidth=2, label='fit')
         drop_marks, = ax.plot([], [], 'o', color='tab:red', markersize=8, label='initial drop')
-        ax.legend(loc="best", fontsize=8)  # Automatic position: the spot with the least data
-        info = ax.text(0.02, 0.98, "", transform=ax.transAxes, va="top", ha="left", fontsize=8,
-                       family="monospace", bbox=dict(boxstyle="round", facecolor="white", alpha=0.85))
+        if ax.get_legend() is not None:
+            ax.get_legend().remove()  # The legend goes in the results panel instead
 
-        slider_ax = fig.add_axes([0.25, 0.08, 0.6, 0.03])
+        panel = fig.add_axes([0.65, 0.25, 0.34, 0.65])
+        panel.axis("off")
+        info = panel.text(0.0, 1.0, "", transform=panel.transAxes, va="top", ha="left", fontsize=8,
+                          family="monospace")
+        handles, labels = ax.get_legend_handles_labels()
+        legend = panel.legend(handles, labels, loc="lower left", fontsize=8, title="Legend")
+        legend.set_draggable(True)
+
+        slider_ax = fig.add_axes([0.25, 0.08, 0.37, 0.03])
         slider = RangeSlider(slider_ax, "Range (s)", float(t[0]), float(t[-1]),
                              valinit=(float(t[0]), float(t[-1])))
 
@@ -253,8 +310,8 @@ def _summary(fit, peaks, period, perr, source, unit: str = "", drop=None) -> str
     if drop is not None:
         u = f" {unit}" if unit else ""
         if drop.ok:
-            lines.append(f"Initial drop = {drop.drop:.4g}{u} in {drop.duration:.4g} s "
-                         f"(high at {drop.t_high:.3g} s, low at {drop.t_low:.3g} s)")
+            lines.append(f"Initial drop = {drop.drop:.4g}{u} in {drop.duration:.4g} s")
+            lines.append(f"  (high at {drop.t_high:.3g} s, low at {drop.t_low:.3g} s)")
         else:
             lines.append(f"Initial drop: {drop.message}")
     return "\n".join(lines)

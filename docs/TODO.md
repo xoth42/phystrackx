@@ -1,6 +1,12 @@
 # TODO
 
 ## Last done (newest first)
+- **Plots:**
+  - Fit results and the legend sit in a panel beside the plot, so nothing covers the data.
+  - Plots without a fit have a legend that is placed automatically and can be dragged.
+  - Every plot has a **Save plot** button. The dialog starts in the project's folder, with a name
+    from the video and the plot, and the buttons and sliders are left out of the image.
+- **New projects** are created next to the video (or in `projects/` if that folder is read-only).
 - **Axis tool:** drag the axes by the origin or either line to move them, and the rotation bar
   stays as before. The axis items are moved instead of recreated, which removes the lag. Opening the
   tool on placed axes allows dragging at once, and Escape (or starting another tool) puts them back.

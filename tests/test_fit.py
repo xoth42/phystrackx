@@ -130,7 +130,7 @@ def test_distance_r_is_csv_column_and_plot():
     plot._widgets = []
     plot.plotr()
     ax = plt.gcf().axes[0]
-    texts = [tx.get_text() for tx in ax.texts]
+    texts = [tx.get_text() for a in plt.gcf().axes for tx in a.texts]
     h.check("r plot shows the fitted period", any("T fit" in tx and f"{PERIOD:.2f}"[:3] in tx
                                                   for tx in texts), str(texts[:1]))
     plt.close("all")
@@ -173,7 +173,7 @@ def test_plot_fit_type_switch():
     plot.ploty()
     radio = plot._widgets[-1]
     ax = plt.gcf().axes[0]
-    text = lambda: "\n".join(tx.get_text() for tx in ax.texts)  # noqa: E731
+    text = lambda: "\n".join(tx.get_text() for a in plt.gcf().axes for tx in a.texts)  # noqa: E731
     h.check("drift model is the default", "m     =" in text(), text()[:80])
     keys = list(MODELS)
     radio.set_active(keys.index("damped"))
@@ -206,8 +206,7 @@ def test_plot_slider_updates_the_fit():
     from matplotlib.widgets import RangeSlider
     slider = [w for w in plot._widgets if isinstance(w, RangeSlider)][-1]
     slider.set_val((float(t[0]), float(t[-1]) / 2))  # Only the first half
-    ax = plt.gcf().axes[0]
-    texts = [tx.get_text() for tx in ax.texts]
+    texts = [tx.get_text() for a in plt.gcf().axes for tx in a.texts]
     h.check("slider shows a summary", any("T fit" in tx for tx in texts))
     h.check("summary reports the fitted period", any(f"{PERIOD:.2f}"[:3] in tx for tx in texts),
             str(texts[:1]))
@@ -266,7 +265,7 @@ def test_plot_offers_the_drag_models():
     plot.ploty()
     radio = plot._widgets[-1]
     ax = plt.gcf().axes[0]
-    text = lambda: "\n".join(tx.get_text() for tx in ax.texts)  # noqa: E731
+    text = lambda: "\n".join(tx.get_text() for a in plt.gcf().axes for tx in a.texts)  # noqa: E731
     h.check("the fit menu lists 4 models", len(MODELS) == 4, str(list(MODELS)))
     radio.set_active(list(MODELS).index("drag"))
     h.check("the drag model shows its drag strength k", "k     =" in text(), text()[:120])
@@ -306,15 +305,65 @@ def test_plot_shows_drop_markers_and_a_legend():
     plot.datamanager = data
     plot._widgets = []
     plot.ploty()
-    ax = plt.gcf().axes[0]
-    texts = "\n".join(tx.get_text() for tx in ax.texts)
+    fig = plt.gcf()
+    ax = fig.axes[0]
+    texts = "\n".join(tx.get_text() for a in fig.axes for tx in a.texts)
     h.check("the plot reports the initial drop", "Initial drop =" in texts, texts[-120:])
-    legend = ax.get_legend()
-    labels = [tx.get_text() for tx in legend.get_texts()] if legend else []
-    h.check("the plot has a legend with the fit and the drop", "fit" in labels and
+    h.check("nothing is written over the data", not ax.texts and ax.get_legend() is None,
+            f"{len(ax.texts)} texts, legend {ax.get_legend()}")
+    legends = [a.get_legend() for a in fig.axes if a.get_legend() is not None]
+    labels = [tx.get_text() for lg in legends for tx in lg.get_texts()]
+    h.check("the side panel has a legend with the fit and the drop", "fit" in labels and
             "initial drop" in labels, str(labels))
-    h.check("the legend is placed automatically", legend is not None and legend._loc == 0,
-            f"loc {legend._loc if legend else None}")
+    h.check("the legend can be dragged", all(lg._draggable is not None for lg in legends))
+    plt.close("all")
+
+
+def test_save_plot_starts_in_the_project_folder():
+    """Save plot: the dialog opens in the project's folder with a name from the video and the
+    plot, and the file written leaves the buttons and sliders out."""
+    import os
+    import tempfile
+    import matplotlib.pyplot as plt
+    import gui.components.plot.plot as plot_module
+    from gui.components.plot.plot import Plot
+
+    class _Data:
+        pass
+
+    t = np.arange(300) / 30
+    y = 50 + 40 * np.cos(2 * math.pi * 0.5 * t)
+    data = _Data()
+    data.processed_points = [np.column_stack([np.zeros_like(y), y])]
+    data.timestamps = t
+    data.unit = "cm"
+    plot = Plot.__new__(Plot)
+    plot.datamanager = data
+    plot._widgets = []
+    folder = tempfile.mkdtemp(dir=h.WORK_DIR)
+    plot.save_dir = folder
+    plot.save_prefix = "Air Trial 1"
+    plot.plotr()
+    asked = {}
+
+    def fake_dialog(**options):
+        asked.update(options)
+        return os.path.join(folder, options["initialfile"])
+
+    real = plot_module.filedialog.asksaveasfilename
+    plot_module.filedialog.asksaveasfilename = fake_dialog
+    try:
+        buttons = [w for w in plot._widgets if w.__class__.__name__ == "Button"]
+        h.check("the plot has a Save plot button", len(buttons) == 1)
+        path = plot.save_figure(plt.gcf(), "[O-1] $r$ vs $T$")
+    finally:
+        plot_module.filedialog.asksaveasfilename = real
+    h.check("the dialog starts in the project folder", asked.get("initialdir") == folder, str(asked))
+    h.check("the suggested name comes from the video and the plot",
+            asked.get("initialfile") == "Air Trial 1_O_1_r_vs_T.png", asked.get("initialfile"))
+    h.check("the plot is written", path is not None and os.path.getsize(path) > 10000, str(path))
+    h.check("the controls are shown again after saving",
+            all(w.ax.get_visible() for w in plot._widgets))
     plt.close("all")
 
 
@@ -325,4 +374,5 @@ if __name__ == "__main__":
                  test_plot_slider_updates_the_fit,
                  test_quadratic_drag_recovers_the_parameters, test_quadratic_drag_with_drift_recovers_the_slope,
                  test_plot_offers_the_drag_models, test_initial_drop_is_high_to_first_low,
-                 test_plot_shows_drop_markers_and_a_legend])
+                 test_plot_shows_drop_markers_and_a_legend,
+                 test_save_plot_starts_in_the_project_folder])
