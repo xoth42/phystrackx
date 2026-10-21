@@ -24,6 +24,7 @@ class Crop:
         self.cropx = self.cropy = 0
         self.sx = self.sy = 0
         self._ctkbox = None
+        self._drawing = False  # True from Crop Region until the crop is applied or cancelled
         self.croprect = None
         self.on_apply = None  # Optional callback after a crop is applied
 
@@ -121,11 +122,30 @@ class Crop:
             self.bin_button.pack(anchor=ctk.N, pady=50)
             self.apply_button.pack(side="right", padx=10, pady=10, anchor="se")
 
+        self._drawing = True
         self.canvas.bind("<Button-1>", ondown)
         self.canvas.bind("<B1-Motion>", inrect)
         self.canvas.bind("<ButtonRelease-1>", onrelease)
 
+    def cancel(self):
+        """Another tool was started: a crop that is not applied yet is dropped, so the frame is
+        back to the full size, as before Crop Region."""
+        if not self._drawing:
+            return
+        self._drawing = False
+        self.canvas.unbind("<Button-1>")
+        self.canvas.unbind("<B1-Motion>")
+        self.canvas.unbind("<ButtonRelease-1>")
+        self.clearrect()
+        self.bin_button.pack_forget()
+        self.apply_button.pack_forget()
+        self.clear()
+        self.updateframe()
+        if self.on_apply:
+            self.on_apply()
+
     def apply(self):
+        self._drawing = False
         self.clearrect()
 
         self.logger.info(f"Applying crop | Crop width: {self.cropwidth}, Crop height: {self.cropheight}")

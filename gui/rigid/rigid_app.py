@@ -11,6 +11,7 @@ import logging
 import os
 import queue
 import threading
+import tkinter as tk
 from tkinter import BooleanVar, filedialog, messagebox
 
 import cv2
@@ -18,7 +19,7 @@ import customtkinter as ctk
 from PIL import Image, ImageTk
 
 from core import PixelRect, NormalizedRect
-from core import session
+from core import crash, session
 from gui.components.plot.csvdata import load_csv
 from core.project import PROJECT_EXTENSION, new_project, read_project, write_project
 from gui.app import App
@@ -60,6 +61,9 @@ class RigidApp(App):
     
     def __init__(self, root, videopath: str | None = None, projectpath: str | None = None) -> None:
         super().__init__(root)
+        # Worker threads (loading, trimming, tracking) must never run Tk code, and garbage
+        # collection deletes Tk objects: keep it on this (the UI) thread
+        crash.collect_on_ui_thread(root)
         self.projectpath: str | None = None
         self.trim_range: dict | None = None
         
@@ -103,13 +107,18 @@ class RigidApp(App):
         self.tpoints.view = self.view
         self.axes.view = self.view
         self.scruler.view = self.view
+        self.scruler.frame_source = lambda: self.videoapp.frame  # For Auto Ruler
+        # The full-resolution copy for zoomed views arrives on a worker thread: redraw on the UI thread
+        self.videoapp.on_native_ready = lambda: self._post_to_ui(self.updateframe)
         self.track_rects.on_apply = self._leave_marking
         self.ocrrects.on_apply = self._leave_marking
         self.axes.on_apply = self._leave_marking
         self.axes.on_cancel = self._leave_marking
         self.scruler.on_apply = self._leave_marking
+        self.scruler.on_cancel = self._leave_marking
         self.viewcontrols = ViewControls(self.vidframe, self.view, on_change=self._on_view_change,
                                          on_shape=self._on_shape)
+        self._bind_view_gestures()
 
         # Crop step of the trim tool: crops the trimmed clip, not just the display
         self.cropstrip = ctk.CTkFrame(self.vidframe, fg_color="transparent")
@@ -123,6 +132,11 @@ class RigidApp(App):
         self.fullres_var = BooleanVar(value=True)
         ctk.CTkCheckBox(self.cropstrip, text="Full resolution", variable=self.fullres_var).pack(
             side="left", padx=15)
+        # Segment Anything re-finds the object on hard frames (a hand moving beside the ball):
+        # more reliable starts, but seconds per hard frame on a CPU, so it is off by default
+        self.assist_var = BooleanVar(value=False)
+        ctk.CTkCheckBox(self.cropstrip, text="Assist (Segment Anything, slow)",
+                        variable=self.assist_var).pack(side="left", padx=15)
         self.plugin_mgr.crop.on_apply = self._update_crop_status
 
         # Tracking screen: stop, manual correction of positions, and the zoom bars
@@ -161,6 +175,104 @@ class RigidApp(App):
             self.videopath = videopath
             self._create_project(videopath)
             self.loadvideo(videopath)
+        self._update_title()
+
+    def _update_title(self) -> None:
+        """Window title: the app, then the project and the video being edited."""
+        parts = ["PhysTrackX"]
+        if self.projectpath:
+            parts.append(os.path.splitext(os.path.basename(self.projectpath))[0])
+        if self.videopath:
+            parts.append(os.path.basename(self.videopath))
+        self.root.title(" - ".join(parts))
+
+    # Two-finger trackpad scrolls pan, and Cmd +/- zoom around the pointer. Pointer position and
+    # scrolling use their own bind tag, so the canvas's bindings for axes and rectangles are kept.
+    VIEW_TAG = "PhysTrackView"
+    WHEEL_PIXELS = 40  # Pixels moved per mouse-wheel notch
+    ZOOM_STEP = 1.25
+
+    def _bind_view_gestures(self) -> None:
+        tags = self.videoview.bindtags()
+        self.videoview.bindtags(tags[:1] + (self.VIEW_TAG,) + tags[1:])
+        self._pointer = None  # Last pointer position over the view; kept after it leaves
+        self.root.bind_class(self.VIEW_TAG, "<Motion>", self._on_view_pointer)
+        self.root.bind_class(self.VIEW_TAG, "<MouseWheel>", self._on_wheel)
+        self.root.bind_class(self.VIEW_TAG, "<Shift-MouseWheel>", self._on_wheel_sideways)
+        self.root.bind_class(self.VIEW_TAG, "<Button-4>", lambda e: self._pan_view(0, self.WHEEL_PIXELS))
+        self.root.bind_class(self.VIEW_TAG, "<Button-5>", lambda e: self._pan_view(0, -self.WHEEL_PIXELS))
+        try:
+            # Tk 9 on macOS sends trackpad scrolls as precise pixel deltas, packed as x and y
+            self.root.bind_class(self.VIEW_TAG, "<TouchpadScroll>", self._on_touchpad)
+        except tk.TclError:
+            pass  # Older Tk: the mouse-wheel bindings still work
+        for key in ("equal", "plus", "KP_Add"):
+            self.root.bind(f"<Command-{key}>", lambda e: self._zoom_by(self.ZOOM_STEP))
+            self.root.bind(f"<Control-{key}>", lambda e: self._zoom_by(self.ZOOM_STEP))
+        for key in ("minus", "KP_Subtract"):
+            self.root.bind(f"<Command-{key}>", lambda e: self._zoom_by(1 / self.ZOOM_STEP))
+            self.root.bind(f"<Control-{key}>", lambda e: self._zoom_by(1 / self.ZOOM_STEP))
+        for key in ("0", "KP_0"):  # Back to the whole picture, as Reset View
+            self.root.bind(f"<Command-{key}>", lambda e: self._reset_zoom())
+            self.root.bind(f"<Control-{key}>", lambda e: self._reset_zoom())
+
+    def _on_view_pointer(self, event) -> None:
+        self._pointer = (event.x, event.y)
+
+    def _on_wheel(self, event) -> None:
+        self._pan_view(0, self._notches(event.delta) * self.WHEEL_PIXELS)
+
+    def _on_wheel_sideways(self, event) -> None:
+        self._pan_view(self._notches(event.delta) * self.WHEEL_PIXELS, 0)
+
+    @staticmethod
+    def _notches(delta: int) -> float:
+        """Windows sends 120 per notch; macOS mice send small counts. Both become notches."""
+        return delta / 120 if abs(delta) >= 120 else float(delta)
+
+    def _on_touchpad(self, event) -> None:
+        """Packs the x scroll in the high 16 bits and the y scroll in the low 16 (as Tk does)."""
+        packed = int(event.delta)
+        dx = packed >> 16
+        low = packed & 0xFFFF
+        dy = low if low < 0x8000 else low - 0x10000
+        self._pan_view(dx, dy)
+
+    def _pan_view(self, dx: float, dy: float) -> None:
+        if self.videoapp.fcount < 10 or (dx == 0 and dy == 0):
+            return
+        self.view.pan(dx, dy)
+        self._redraw_soon()
+
+    def _zoom_by(self, factor: float) -> None:
+        """Zooms by factor around the pointer's last position on the view (the centre if unknown)."""
+        if self.videoapp.fcount < 10:
+            return
+        x, y = self._pointer or (self.videoview.winfo_width() / 2, self.videoview.winfo_height() / 2)
+        self.view.zoom_at(x, y, self.view.zoom * factor)
+        self._redraw_soon()
+
+    def _reset_zoom(self) -> None:
+        """Cmd 0: the whole picture again, as the Reset View button."""
+        if self.videoapp.fcount < 10:
+            return
+        self.view.reset()
+        self._redraw_soon()
+
+    def _redraw_soon(self) -> None:
+        """Redraws once the queued input is handled. A trackpad sends about 60 scroll events a
+        second; drawing for each one queues work faster than it is done, so the picture trails the
+        fingers. The view moves with every event, and the picture is drawn once per batch."""
+        if getattr(self, "_redraw_pending", False):
+            return
+        self._redraw_pending = True
+
+        def redraw():
+            self._redraw_pending = False
+            self.viewcontrols.sync()
+            self._on_view_change()
+
+        self.root.after_idle(redraw)
 
     def _create_project(self, videopath: str) -> None:
         """A video opened without a project gets a new project file in projects/, so Save writes
@@ -414,7 +526,18 @@ class RigidApp(App):
         self.viewcontrols.show(before=self.videoview, with_shape=with_shape)
         self.viewcontrols.sync()
 
+    def _cancel_active_tools(self) -> None:
+        """Starting a tool ends the one in progress: an unfinished axis or ruler is cancelled,
+        boxes being marked are applied, and an unapplied crop is dropped."""
+        self.axes.cancelaxes()
+        self.scruler.cancel()
+        self.track_rects.cancel()
+        self.ocrrects.cancel()
+        self.plugin_mgr.crop.cancel()
+        self.plugin_mgr.geometry.cancel()
+
     def markaxes(self) -> None:
+        self._cancel_active_tools()
         self._enter_marking(with_shape=False)
         self.axes.markaxes()
 
@@ -425,10 +548,12 @@ class RigidApp(App):
 
     def scale(self) -> None:
         self.logger.info("Deploying coordinate scale rule overlay layer.")
+        self._cancel_active_tools()
         self._enter_marking(with_shape=False)
         self.scruler.pack()
 
     def drawrect(self) -> None:
+        self._cancel_active_tools()
         if self._ensure_video_loaded() and self._ensure_video_trimmed():
             self.logger.info("Activating workspace item tracking validation boxes.")
             self.title = TitleBar(self.videoview, self.vwidth, "Mark Tool")
@@ -437,6 +562,7 @@ class RigidApp(App):
                                       self.plugin_mgr.crop.cropx, self.plugin_mgr.crop.cropy)
 
     def apply_filter(self) -> None:
+        self._cancel_active_tools()
         if self._ensure_video_loaded():
             self.logger.info("Opening dynamic filter modification matrix menu panel.")
             self.title = TitleBar(self.videoview, self.vwidth, "Filters Tool")
@@ -444,6 +570,7 @@ class RigidApp(App):
             self.plugin_mgr.toggle()
 
     def drawcrop(self) -> None:
+        self._cancel_active_tools()
         if self._ensure_video_loaded():
             self.logger.info("Initializing visual spatial geometric crop tool profiles.")
             self.title = TitleBar(self.videoview, self.vwidth, "Crop Tool")
@@ -451,6 +578,7 @@ class RigidApp(App):
             self.plugin_mgr.toggle()
 
     def drawocr(self) -> None:
+        self._cancel_active_tools()
         if self._ensure_video_loaded():
             self.logger.info("Mapping optical text zone character digit capture constraints.")
             self.title = TitleBar(self.videoview, self.vwidth, "OCR Tool")
@@ -460,12 +588,14 @@ class RigidApp(App):
             self.plugin_mgr.toggle()
 
     def dogeometry(self) -> None:
+        self._cancel_active_tools()
         self.logger.info("Launching trace physics kinematic geometry tracking instruments.")
         self.title = TitleBar(self.videoview, self.vwidth, "Geometry Tool")
         self.plugin_mgr.geometry.pack()
         self.plugin_mgr.toggle()
 
     def strack(self) -> None:
+        self._cancel_active_tools()  # Box mode and any other tool end when tracking is asked for
         if not self._ensure_video_loaded() or not self._ensure_video_trimmed() or \
             (not self.track_rects.rects and not self.ocrrects.rects):
             self.logger.warning("Tracking execution bypassed: no nodes or bounding layers found on canvas.")
@@ -494,20 +624,25 @@ class RigidApp(App):
         self._enter_track_view()
         # Read on the UI thread: Tk variables must not be touched from the worker thread
         fullres = self.fullres_var.get()
+        filters = self.plugin_mgr.filters.snapshot()
+        assist = self.assist_var.get()
         if fullres:
             self.trackstatus.configure(text="Preparing full-resolution copy...")
         self._track_thread = threading.Thread(target=self._track_in_background,
-                                              args=(progress, fullres), daemon=True)
+                                              args=(progress, fullres, filters, assist),
+                                              daemon=True)
         self._track_thread.start()
         self.progressbar.update()
 
-    def _track_in_background(self, progress: "_LoadProgress", fullres: bool = False) -> None:
-        """Runs on a worker thread. Failures are reported to the user instead of stalling the UI."""
+    def _track_in_background(self, progress: "_LoadProgress", fullres: bool = False,
+                             filters=None, assist: bool = False) -> None:
+        """Runs on a worker thread. Failures are reported to the user instead of stalling the UI.
+        Nothing here may touch Tk (widgets or Tk variables): the filter comes in as a snapshot."""
         try:
             self.videoapp.track(self.track_rects, self.ocrrects, progress,
                                 on_frame=self._on_tracked_frame,
                                 should_stop=lambda: self._stop_requested,
-                                fullres=fullres,
+                                fullres=fullres, filters=filters, assist=assist,
                                 on_tracking=lambda: self._post_to_ui(self._show_tracking_text))
         except Exception as e:
             self.logger.exception("Tracking failed")
@@ -687,6 +822,7 @@ class RigidApp(App):
                 return
             self.projectpath = path
             session.set_project(path)
+            self._update_title()
 
         try:
             write_project(self.projectpath, self.project_state())
@@ -815,5 +951,5 @@ class RigidApp(App):
     def plugins(self) -> None:
         self.title = TitleBar(self.videoview, self.vwidth, "Plugins")
         self.plugin_mgr.toggle()
-        self.plugin_mgr.geometry.set_scale(self.scruler.scale)
+        self.plugin_mgr.geometry.set_scale(self.scruler.scale, self.scruler.unit_label())
         self.logger.info("Extended dynamic components toolbox toggled.")

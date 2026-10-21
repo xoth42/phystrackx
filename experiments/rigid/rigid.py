@@ -10,6 +10,7 @@ Author: Isam Balghari
 import cv2
 import numpy as np
 import logging
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 from typing import Optional, List
 from numpy.typing import NDArray
@@ -80,7 +81,8 @@ class Rigid(Experiment):
 
     def track(self, frameidx: int, rects: List[NormalizedRect], ocrrects: List[NormalizedRect],
               filters: Filters, crop: Crop, progress: Optional[IntVar] = None,
-              on_frame=None, should_stop=None, fullres: Optional[FullResSource] = None) -> None:
+              on_frame=None, should_stop=None, fullres: Optional[FullResSource] = None,
+              assist=None) -> None:
         """Executes analysis sequences across video payloads.
 
         Stored positions are in pixels of the clip as shown on screen, whichever size the
@@ -93,8 +95,10 @@ class Rigid(Experiment):
             fullres (FullResSource, optional): When given, the frames are read from the
                 full-resolution copy and tracked at that size, so the on-screen size does not
                 limit the measurement.
+            assist (HardEngine, optional): Segment Anything for the hard frames (see assist.py).
         """
         dw, dh = crop.cropwidth, crop.cropheight  # The clip's size on screen
+        self.assist = assist
 
         if fullres is None:
             self._track_clip(frameidx, rects, ocrrects, filters, crop, progress, on_frame,
@@ -178,6 +182,29 @@ class Rigid(Experiment):
 
         # The seed frame was read above, so the loop starts at the next frame. Each read below is
         # frame i, which keeps every stored point on the frame it was measured from.
+        # Several objects are tracked side by side: OpenCV releases the GIL while a tracker runs,
+        # so three objects take about 60% of the time they take one after another. One object is
+        # faster without the hand-off to a thread.
+        pool = ThreadPoolExecutor(max_workers=len(rects)) if len(rects) > 1 else None
+        try:
+            self._track_frames(frameidx, count, rects, ocrrects, reader, prepare, should_stop,
+                               on_frame, progress, kx, ky, tw, th, dw, dh, native, pool)
+        finally:
+            if pool is not None:
+                pool.shutdown(wait=True)
+
+        self.logger.info("Rigid body tracking and OCR processing complete. Compiling final digitized sequences.")
+
+        # Compile final digitized sequences
+        self.texts = OCRData(self.textsdata)
+        self.logger.info(f"OCR Data Cleaning Complete: {len(self.texts)} channels with {self.texts.samplecount} samples each.")
+
+    def _track_frames(self, frameidx, count, rects, ocrrects, reader, prepare, should_stop,
+                      on_frame, progress, kx, ky, tw, th, dw, dh, native, pool) -> None:
+        """The frame loop: reads each frame, updates every tracker, and reports progress."""
+        assist = getattr(self, "assist", None)
+        prev_gray = None
+        prev_boxes = [rect.norm2pix(tw, th) for rect in rects]  # Last good box of each object
         for i in tqdm(range(frameidx + 1, count), desc="Processing Video Rails"):
             if should_stop is not None and should_stop():
                 self.logger.info(f"Tracking stopped by user at frame {i}; keeping results so far.")
@@ -186,11 +213,19 @@ class Rigid(Experiment):
 
             # Process Spatial Translation Track Vectors
             live_boxes = []  # (x, y, w, h) per tracked object in this frame, for the live display
-            for j in range(len(rects)):
-
-                tracker = self.mltrackers[j]
-                success, box = tracker.update_tracker(frame)
-
+            if pool is not None:
+                results = list(pool.map(lambda tracker: tracker.update_tracker(frame),
+                                        self.mltrackers))
+            else:
+                results = [tracker.update_tracker(frame) for tracker in self.mltrackers]
+            if assist is not None:
+                gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+                if prev_gray is not None:
+                    results = [self._assisted(j, ok, box, frame, gray, prev_gray, prev_boxes[j],
+                                              assist, i) for j, (ok, box) in enumerate(results)]
+                prev_gray = gray
+                prev_boxes = [box if ok else prev for (ok, box), prev in zip(results, prev_boxes)]
+            for j, (success, box) in enumerate(results):
                 if success:
                     x, y = box.tocenter()
                     self.trackpts[j][i] = [x * kx, y * ky]
@@ -217,12 +252,25 @@ class Rigid(Experiment):
             if progress is not None:
                 progress.set(int(((i - frameidx) / max(count - 1 - frameidx, 1)) * 100))
 
-        self.logger.info("Rigid body tracking and OCR processing complete. Compiling final digitized sequences.")
-
-        # Compile final digitized sequences
-        self.texts = OCRData(self.textsdata)
-        self.logger.info(f"OCR Data Cleaning Complete: {len(self.texts)} channels with {self.texts.samplecount} samples each.")
-
+    def _assisted(self, j, success, box, frame, gray, prev_gray, prev_box, assist, index):
+        """
+        The fast tracker's result for object j, checked by the hard engine. On a hard frame (or a
+        lost object), Segment Anything finds the object again from its last good position and the
+        fast tracker restarts on it.
+        """
+        tracker = self.mltrackers[j]
+        if success:
+            hard = assist.is_hard(prev_gray, gray, box, prev_box, tracker.score(), index)
+        else:
+            hard = assist.ready(index)
+        if not hard:
+            return success, box
+        found = assist.redetect(frame, prev_box.tocenter(), prev_box, index)
+        if found is None:
+            return success, box
+        tracker.initialize_tracker(frame, found)
+        self.logger.info(f"Frame {index}: object {j + 1} found again by Segment Anything")
+        return True, found
 
     def set(self, fwidth: int, fheight: int) -> None:
         """Sets the frame width and height for processing."""

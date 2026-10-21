@@ -9,6 +9,7 @@ Author: Isam Balghari
 import hashlib
 import logging
 import os
+import re
 import subprocess
 from typing import Callable, Optional
 
@@ -26,6 +27,27 @@ def _cache_key(videopath: str, width: int, height: int) -> str:
     # PROXY_VERSION changes whenever the encoding settings change, so old proxies are re-made
     raw = f"{PROXY_VERSION}|{os.path.abspath(videopath)}|{st.st_size}|{st.st_mtime_ns}|{width}x{height}"
     return hashlib.sha1(raw.encode()).hexdigest()[:10]
+
+
+def source_is_plain(videopath: str) -> bool:
+    """
+    True when the video can be read as it is: even width and height, and no rotation. Such a file
+    already holds the pixels a full-resolution copy would have, so the copy need not be encoded.
+    Read from ffmpeg's own report, so no ffprobe is needed.
+    """
+    try:
+        ffmpeg = find_ffmpeg()
+        report = subprocess.run([ffmpeg, "-hide_banner", "-i", videopath], capture_output=True,
+                                text=True).stderr
+    except (FileNotFoundError, OSError):
+        return False
+    if "rotation of" in report or re.search(r"\brotate\s*:", report):
+        return False
+    match = re.search(r"Stream #\d+:\d+.*Video:.*?,\s*(\d+)x(\d+)", report)
+    if not match:
+        return False
+    width, height = int(match.group(1)), int(match.group(2))
+    return width % 2 == 0 and height % 2 == 0
 
 
 def proxyvideo(videopath: str, width: int = 1000, height: int = -2,

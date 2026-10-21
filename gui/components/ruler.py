@@ -7,12 +7,23 @@ Enables real-world dimension mapping configurations for video frames.
 Author: Isam Balghari
 """
 
+import threading
 import customtkinter as ctk
 from math import floor, atan2, cos, sin, degrees, hypot, radians
+from tkinter import messagebox
 from typing import Dict, Any, Optional
+from core.units import parse_length, unit_suffix
+from core.autoruler import snap_ruler
 from .dialogbox import DialogBox
 from .buttons import SubmitButton
 from .anglecontrol import AngleControl
+
+
+def _load_segmenter():
+    """Segment Anything for Auto Ruler, or None when the model is not installed (the ruler then
+    snaps by colour and edges)."""
+    from media.segmenter import default_segmenter
+    return default_segmenter()
 
 
 class ScaleRuler:
@@ -48,9 +59,11 @@ class ScaleRuler:
         # Calibration States
         self.scale: float = 1.0
         self.real_world_length: Optional[float] = None
+        self.unit: str = ""  # Unit typed with the length, e.g. "cm" ("" when none)
         self.placed = False  # True once the user has shown the ruler
         self.view = None  # ViewTransform, set by the app so the ruler follows zoom and pan
         self.on_apply = None  # Optional callback after Apply (used to leave marking mode)
+        self.on_cancel = None  # Optional callback after Cancel (used to leave marking mode)
         self.dragging: Optional[str] = None
         self.offset = [0, 0]
 
@@ -60,6 +73,11 @@ class ScaleRuler:
 
         self.applybtn: Optional[ctk.CTkButton] = None
         self.btn_window_id: Optional[int] = None
+        self.autobtn: Optional[ctk.CTkButton] = None
+        self.undobtn: Optional[ctk.CTkButton] = None
+        self._before_snap = None  # Ends before the last Auto Ruler, for Undo
+        # Returns the frame being shown (BGR image in frame pixels), for Auto Ruler
+        self.frame_source = None
 
     # ---------------------------------------------------------------------------------------------
     # Geometry helpers
@@ -87,8 +105,12 @@ class ScaleRuler:
     def get_state(self) -> dict:
         """Ruler endpoints in canvas pixels, plus the calibrated length."""
         return {"p1": list(self.p1), "p2": list(self.p2),
-                "real_world_length": self.real_world_length,
+                "real_world_length": self.real_world_length, "unit": self.unit,
                 "canvas": [self.vwidth, self.vheight]}
+
+    def unit_label(self) -> str:
+        """The unit the measurements are in: the typed unit once calibrated, else pixels."""
+        return self.unit if self.real_world_length is not None else "px"
 
     def restore_state(self, state: dict) -> None:
         """Re-places the ruler and its calibration, scaling if the window size has changed."""
@@ -97,6 +119,7 @@ class ScaleRuler:
         self.p1 = [state["p1"][0] * sx, state["p1"][1] * sy]
         self.p2 = [state["p2"][0] * sx, state["p2"][1] * sy]
         self.real_world_length = state["real_world_length"]
+        self.unit = state.get("unit", "")
         self.placed = True
         self._sync_angle()
         self.draw()
@@ -130,6 +153,89 @@ class ScaleRuler:
             tags=self.BUTTON_TAG
         )
 
+        # Snaps the ruler's ends to the object's ends, along its left edge
+        self.autobtn = ctk.CTkButton(self.canvas, text="Auto Ruler", width=110, height=40,
+                                     command=self.autosnap)
+        self.canvas.create_window(self.vwidth - 90, self.vheight - 20, window=self.autobtn,
+                                  anchor="se", tags=self.BUTTON_TAG)
+
+        # Puts the ruler back where it was before the last Auto Ruler
+        self.undobtn = ctk.CTkButton(self.canvas, text="Undo", width=90, height=40,
+                                     command=self.undo_autosnap, state="disabled")
+        self.canvas.create_window(self.vwidth - 210, self.vheight - 20, window=self.undobtn,
+                                  anchor="se", tags=self.BUTTON_TAG)
+
+    def undo_autosnap(self) -> None:
+        """Puts the ruler's ends back to where they were before the last Auto Ruler."""
+        if self._before_snap is None:
+            return
+        self.p1, self.p2 = [list(p) for p in self._before_snap]
+        self._before_snap = None
+        if self.undobtn:
+            self.undobtn.configure(state="disabled")
+        self._sync_angle()
+        self.draw()
+
+    def autosnap(self) -> None:
+        """
+        Moves the ruler's ends onto the edges of the object it lies on (see core/autoruler).
+
+        With Segment Anything installed, the object's outline comes from the model, which takes
+        some seconds, so the work runs on a worker thread and the button shows that it is busy.
+        The worker gets the frame as a plain array and never touches Tk.
+        """
+        if getattr(self, "_snapping", False):
+            return
+        image = self.frame_source() if self.frame_source else None
+        if image is None:
+            messagebox.showerror("Auto Ruler", "There is no picture to measure yet.")
+            return
+        ox, oy = self.view.origin if self.view is not None else (0, 0)
+        start1 = (self.p1[0] - ox, self.p1[1] - oy)
+        start2 = (self.p2[0] - ox, self.p2[1] - oy)
+        half_width = self.height / 2
+        result = {}
+
+        def work():
+            try:
+                segmenter = _load_segmenter()
+                result["ends"] = snap_ruler(image, start1, start2, side="left",
+                                            half_width=half_width, segmenter=segmenter)
+            except Exception as e:  # Reported on the UI thread below
+                result["error"] = e
+
+        self._snapping = True
+        if self.autobtn:
+            self.autobtn.configure(state="disabled", text="Finding...")
+        worker = threading.Thread(target=work, daemon=True)
+        worker.start()
+
+        def finish():
+            if worker.is_alive():
+                self.canvas.after(100, finish)
+                return
+            self._snapping = False
+            if self.autobtn is None:
+                return  # The ruler was closed meanwhile
+            self.autobtn.configure(state="normal", text="Auto Ruler")
+            if "error" in result:
+                messagebox.showerror("Auto Ruler", str(result["error"]))
+                return
+            q1, q2 = result["ends"]
+            self._apply_snap(q1, q2, ox, oy)
+
+        self.canvas.after(100, finish)
+
+    def _apply_snap(self, q1, q2, ox: float, oy: float) -> None:
+        """Moves the ends to the snapped points (frame pixels), keeping the old ones for Undo."""
+        self._before_snap = ([list(self.p1), list(self.p2)])
+        self.p1 = [q1[0] + ox, q1[1] + oy]
+        self.p2 = [q2[0] + ox, q2[1] + oy]
+        if self.undobtn:
+            self.undobtn.configure(state="normal")
+        self._sync_angle()
+        self.draw()
+
     def ondclick(self, event: Any) -> None:
         """Triggers the scale parameter dialog prompts upon registration."""
         self.askscale()
@@ -147,6 +253,23 @@ class ScaleRuler:
         self.clear()
         if self.on_apply:
             self.on_apply()
+
+    def cancel(self) -> None:
+        """Stops placing the ruler without applying it, when another tool is started. A ruler
+        that was calibrated before is kept; one that was never calibrated is removed."""
+        if self.applybtn is None:
+            return
+        self.canvas.unbind("<Button-1>")
+        self.canvas.unbind("<B1-Motion>")
+        self.canvas.unbind("<ButtonRelease-1>")
+        self.canvas.unbind("<Double-Button-1>")
+        for btn in self.btnlist.values():
+            btn.configure(state="normal")
+        self.clear()
+        if self.real_world_length is None:
+            self.placed = False
+        if self.on_cancel:
+            self.on_cancel()
 
     def rotate_to(self, theta_deg: float) -> None:
         """Turns the ruler to `theta_deg` about its midpoint, keeping its length."""
@@ -207,9 +330,9 @@ class ScaleRuler:
         # Dynamic Value Mapping Logic (Preserves user calibration inputs over drags)
         if self.real_world_length is not None:
             self.scale = self.real_world_length / float(pixels)
-            display_text = f"{self.real_world_length:.2f} units"
+            display_text = f"{self.real_world_length:.2f}{unit_suffix(self.unit)}"
         else:
-            display_text = f"{self.scale * pixels:.2f} units"
+            display_text = f"{self.scale * pixels:.2f}px"
 
         # Metric Core String Data Overlay, placed above the ruler
         mx, my = (x1 + x2) / 2, (y1 + y2) / 2
@@ -234,13 +357,21 @@ class ScaleRuler:
 
         dialogbox = DialogBox(
             self.canvas, title="Scale Calibration",
-            message="Enter real-world length this ruler represents:", expected_type=float
+            message="Enter the real-world length this ruler represents,\nwith its unit (e.g. 50 cm):",
+            expected_type=str
         )
+        if dialogbox.result is None:
+            return
+        try:
+            value, unit = parse_length(dialogbox.result)
+        except ValueError as e:
+            messagebox.showerror("Scale Calibration", f"{e}.\nEnter a length such as 50 or 50 cm.")
+            return
 
-        if dialogbox.result is not None and dialogbox.result > 0:
-            self.real_world_length = float(dialogbox.result)
-            self.scale = self.real_world_length / pixels
-            self.draw()
+        self.real_world_length = value
+        self.unit = unit
+        self.scale = self.real_world_length / pixels
+        self.draw()
 
     def onclick(self, event: Any) -> None:
         """Determines context target selection positions upon click events."""
@@ -288,6 +419,13 @@ class ScaleRuler:
         if self.applybtn:
             self.applybtn.destroy()
             self.applybtn = None
+        if self.autobtn:
+            self.autobtn.destroy()
+            self.autobtn = None
+        if self.undobtn:
+            self.undobtn.destroy()
+            self.undobtn = None
+        self._before_snap = None
 
 
 if __name__ == "__main__":

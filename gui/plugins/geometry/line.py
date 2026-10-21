@@ -1,6 +1,7 @@
 """Line segment representation for geometry plugin in PhysTrackX."""
 import math
 import tkinter as tk
+from core.units import unit_suffix
 from .point import Point
 
 
@@ -37,9 +38,10 @@ class Line:
         distance = math.hypot(x0 - proj_x, y0 - proj_y)
         return distance <= threshold
 
-    def label_length(self, canvas: tk.Canvas, scale: float, color: str = "#5EDC16") -> None:
+    def label_length(self, canvas: tk.Canvas, scale: float, color: str = "#5EDC16",
+                     unit: str = "") -> None:
         """
-        Draws the length of the line on the canvas at its midpoint.
+        Draws the length of the line on the canvas at its midpoint, with its unit.
         """
         mid_x = (self.ptstart.x + self.ptend.x) / 2
         mid_y = (self.ptstart.y + self.ptend.y) / 2
@@ -47,7 +49,7 @@ class Line:
 
         self.tktxt = canvas.create_text(
             mid_x, mid_y,
-            text=f"{length:.1f}",
+            text=f"{length:.1f}{unit_suffix(unit)}",
             fill=color,
             font=("Arial", 12, "italic")
         )

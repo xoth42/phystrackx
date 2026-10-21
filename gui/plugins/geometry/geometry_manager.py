@@ -9,6 +9,7 @@ class GeometryManager:
     def __init__(self):
         self.triangles: List[Triangle] = []
         self.scale: float = 1.0
+        self.unit: str = "px"
 
     def add_triangle(self, triangle: Triangle) -> None:
         self.triangles.append(triangle)
@@ -36,7 +37,7 @@ class GeometryManager:
         if not selected:
             return False
         for triangle in selected:
-            triangle.label_lengths(self.scale)
+            triangle.label_lengths(self.scale, self.unit)
             triangle.select()
         return True
 

@@ -13,7 +13,7 @@ from matplotlib.widgets import RadioButtons, RangeSlider
 from gui.components.checkbox import Checkbox
 from .plottype import PlotType
 from .datamanager import DataManager
-from .fit import DEFAULT_MODEL, MODELS, best_period, fit_model, peak_periods
+from .fit import DEFAULT_MODEL, MODELS, best_period, fit_model, initial_drop, peak_periods
 
 
 class Plot:
@@ -55,6 +55,15 @@ class Plot:
     def timestamps(self):
         return self.datamanager.timestamps
 
+    def _unit(self) -> str:
+        """The unit of the plotted values: the ruler's unit, or px before a scale is set."""
+        return getattr(self.datamanager, "unit", "px")
+
+    @staticmethod
+    def _axis(symbol: str, unit: str) -> str:
+        """Axis label with its unit, e.g. '$x$ (cm)'. Without a unit, just the symbol."""
+        return f"{symbol} ({unit})" if unit else symbol
+
     def showplots(self, selected_plots: list[str]) -> None:
         """Displays all selected plots."""
         plot_map = {
@@ -85,7 +94,8 @@ class Plot:
         ymin, ymax = np.min(ydata), np.max(ydata)
         plt.xlim((xmin*0.90, xmax*1.10))  # Add a 10% margin for better visibility
         plt.ylim((ymin*0.90, ymax*1.10))  # Add a 10% margin for better visibility
-        plt.plot(xdata, ydata, '.', color=color)
+        plt.plot(xdata, ydata, '.', color=color, label="data")
+        plt.legend(loc="best", fontsize=8)  # Placed automatically, away from the data
         return plt.gca()
 
     def _add_fit(self, ax, t, y) -> None:
@@ -103,6 +113,8 @@ class Plot:
             return
 
         fit_line, = ax.plot([], [], '-', color='k', linewidth=2, label='fit')
+        drop_marks, = ax.plot([], [], 'o', color='tab:red', markersize=8, label='initial drop')
+        ax.legend(loc="best", fontsize=8)  # Automatic position: the spot with the least data
         info = ax.text(0.02, 0.98, "", transform=ax.transAxes, va="top", ha="left", fontsize=8,
                        family="monospace", bbox=dict(boxstyle="round", facecolor="white", alpha=0.85))
 
@@ -130,6 +142,11 @@ class Plot:
                 last["fit"] = fit
             peaks = peak_periods(tp, yp)
             period, perr, source = best_period(fit, peaks)
+            drop = initial_drop(tp, yp)
+            if drop.ok:
+                drop_marks.set_data([drop.t_high, drop.t_low], [drop.y_high, drop.y_low])
+            else:
+                drop_marks.set_data([], [])
 
             if fit.ok:
                 names = MODELS[fit.model].names
@@ -137,7 +154,7 @@ class Plot:
                 fit_line.set_data(tp, MODELS[fit.model].func(tt, *(fit.params[k] for k in names)))
             else:
                 fit_line.set_data([], [])
-            info.set_text(_summary(fit, peaks, period, perr, source))
+            info.set_text(_summary(fit, peaks, period, perr, source, self._unit(), drop))
             fig.canvas.draw_idle()
 
         slider.on_changed(update)
@@ -147,13 +164,13 @@ class Plot:
 
     def plotx(self):
         for k, tpts in enumerate(self.points):
-            ax = self._plot(self.timestamps, tpts[:, 0], xlabel=r"$T(s)$", ylabel=r"$x$",
+            ax = self._plot(self.timestamps, tpts[:, 0], xlabel=r"$T(s)$", ylabel=self._axis(r"$x$", self._unit()),
                             title=f"[O-{k+1}] " + r"$x$ vs $T$", color='m')
             self._add_fit(ax, self.timestamps, tpts[:, 0])
 
     def ploty(self):
         for k, tpts in enumerate(self.points):
-            ax = self._plot(self.timestamps, tpts[:, 1], xlabel=r"$T(s)$", ylabel=r"$y$",
+            ax = self._plot(self.timestamps, tpts[:, 1], xlabel=r"$T(s)$", ylabel=self._axis(r"$y$", self._unit()),
                             title=f"[O-{k+1}] " + r"$y$ vs $T$", color='m')
             self._add_fit(ax, self.timestamps, tpts[:, 1])
 
@@ -161,54 +178,66 @@ class Plot:
         """Distance from the axes origin, r = sqrt(x^2 + y^2), against time, with the fit."""
         for k, tpts in enumerate(self.points):
             r = np.hypot(tpts[:, 0], tpts[:, 1])
-            ax = self._plot(self.timestamps, r, xlabel=r"$T(s)$", ylabel=r"$r$",
+            ax = self._plot(self.timestamps, r, xlabel=r"$T(s)$", ylabel=self._axis(r"$r$", self._unit()),
                             title=f"[O-{k+1}] " + r"$r$ vs $T$", color='m')
             self._add_fit(ax, self.timestamps, r)
 
     def plotxy(self):
         for k, tpts in enumerate(self.points):
-            self._plot(tpts[:, 0], tpts[:, 1], xlabel=r"$x$", ylabel=r"$y$",
+            self._plot(tpts[:, 0], tpts[:, 1], xlabel=self._axis(r"$x$", self._unit()), ylabel=self._axis(r"$y$", self._unit()),
                        title=f"[O-{k+1}] " + r"$y$ vs $x$", color='c')
 
     def plotdx(self):
         for k, tpts in enumerate(self.points):
             dx_dt = np.gradient(tpts[:, 0], self.timestamps)
-            self._plot(self.timestamps, dx_dt, xlabel=r"$T(s)$", ylabel=r"$\frac{dx}{dt}$",
+            self._plot(self.timestamps, dx_dt, xlabel=r"$T(s)$", ylabel=self._axis(r"$\frac{dx}{dt}$", f"{self._unit()}/s"),
                        title=f"[O-{k+1}] " + r"$\frac{dx}{dt}$", color='g')
 
     def plotdy(self):
         for k, tpts in enumerate(self.points):
             dy_dt = np.gradient(tpts[:, 1], self.timestamps)
-            self._plot(self.timestamps, dy_dt, xlabel=r"$T(s)$", ylabel=r"$\frac{dy}{dt}$",
+            self._plot(self.timestamps, dy_dt, xlabel=r"$T(s)$", ylabel=self._axis(r"$\frac{dy}{dt}$", f"{self._unit()}/s"),
                        title=f"[O-{k+1}] " + r"$\frac{dy}{dt}$", color='g')
 
     def plotd2x(self):
         for k, tpts in enumerate(self.points):
             dx_dt = np.gradient(tpts[:, 0], self.timestamps)
             d2x_dt2 = np.gradient(dx_dt, self.timestamps)
-            self._plot(self.timestamps, d2x_dt2, xlabel=r"$T(s)$", ylabel=r"$\frac{d^2x}{dt^2}$",
+            self._plot(self.timestamps, d2x_dt2, xlabel=r"$T(s)$", ylabel=self._axis(r"$\frac{d^2x}{dt^2}$", f"{self._unit()}/s²"),
                        title=f"[O-{k+1}] " + r"$\frac{d^2x}{dt^2}$", color='b')
 
     def plotd2y(self):
         for k, tpts in enumerate(self.points):
             dy_dt = np.gradient(tpts[:, 1], self.timestamps)
             d2y_dt2 = np.gradient(dy_dt, self.timestamps)
-            self._plot(self.timestamps, d2y_dt2, xlabel=r"$T(s)$", ylabel=r"$\frac{d^2y}{dt^2}$",
+            self._plot(self.timestamps, d2y_dt2, xlabel=r"$T(s)$", ylabel=self._axis(r"$\frac{d^2y}{dt^2}$", f"{self._unit()}/s²"),
                        title=f"[O-{k+1}] " + r"$\frac{d^2y}{dt^2}$", color='b')
 
 
-def _summary(fit, peaks, period, perr, source) -> str:
-    """Text box for the fit parameters and period estimates."""
+def _summary(fit, peaks, period, perr, source, unit: str = "", drop=None) -> str:
+    """Text box for the fit parameters, period estimates, and the initial drop.
+    Amplitude, offset, and drop are in `unit`."""
     lines = []
     if fit.ok:
         p, e = fit.params, fit.errors
-        lines += [
-            f"A     = {p['A']:.3g} ± {e['A']:.2g}",
-            f"gamma = {p['gamma']:.3g} ± {e['gamma']:.2g} /s   tau = {fit.tau:.3g} s",
-            f"omega = {p['omega']:.4g} ± {e['omega']:.2g} rad/s",
-            f"phi   = {p['phi']:.3g} ± {e['phi']:.2g} rad",
-            f"C     = {p['C']:.4g} ± {e['C']:.2g}",
-        ] + ([f"m     = {p['m']:.4g} ± {e['m']:.2g} /s"] if "m" in p else []) + [
+        u = f" {unit}" if unit else ""
+        if fit.model.startswith("drag"):
+            lines += [
+                f"z0    = {p['z0']:.3g} ± {e['z0']:.2g}{u}",
+                f"v0    = {p['v0']:.3g} ± {e['v0']:.2g}{u}/s",
+                f"omega = {p['omega']:.4g} ± {e['omega']:.2g} rad/s",
+                f"k     = {p['k']:.3g} ± {e['k']:.2g} /{unit or 'unit'}",
+                f"C     = {p['C']:.4g} ± {e['C']:.2g}{u}",
+            ]
+        else:
+            lines += [
+                f"A     = {p['A']:.3g} ± {e['A']:.2g}{u}",
+                f"gamma = {p['gamma']:.3g} ± {e['gamma']:.2g} /s   tau = {fit.tau:.3g} s",
+                f"omega = {p['omega']:.4g} ± {e['omega']:.2g} rad/s",
+                f"phi   = {p['phi']:.3g} ± {e['phi']:.2g} rad",
+                f"C     = {p['C']:.4g} ± {e['C']:.2g}{u}",
+            ]
+        lines += ([f"m     = {p['m']:.4g} ± {e['m']:.2g}{u}/s"] if "m" in p else []) + [
             f"R²    = {fit.r2:.4f}",
             f"T fit = {fit.period:.4g} ± {fit.period_err:.2g} s",
         ]
@@ -221,6 +250,13 @@ def _summary(fit, peaks, period, perr, source) -> str:
                      f"({peaks.n_maxima} max, {peaks.n_minima} min)")
     if source is not None:
         lines.append(f"Best T = {period:.4g} ± {perr:.2g} s  [{source}]")
+    if drop is not None:
+        u = f" {unit}" if unit else ""
+        if drop.ok:
+            lines.append(f"Initial drop = {drop.drop:.4g}{u} in {drop.duration:.4g} s "
+                         f"(high at {drop.t_high:.3g} s, low at {drop.t_low:.3g} s)")
+        else:
+            lines.append(f"Initial drop: {drop.message}")
     return "\n".join(lines)
 
 

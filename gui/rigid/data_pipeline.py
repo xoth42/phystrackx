@@ -50,7 +50,7 @@ class DataPipelineManager:
             tpoints=app.tpoints.tpts, ocrdata=app.videoapp.ocrdata, axes=app.axes,
             vwidth=float(app.vwidth), vheight=float(app.vheight),
             fwidth=float(app.fwidth), fheight=float(app.fheight),
-            fps=app.videoapp.fps, scale=app.scruler.scale
+            fps=app.videoapp.fps, scale=app.scruler.scale, unit=app.scruler.unit_label()
         )
         
         # 3. Process Execution Matrix

@@ -38,7 +38,7 @@ class Save:
         """
         self.datamanager = datamanager
         self.checkbox = Checkbox(self.parent, SaveType, text="Choose Data", callback=self.savedata,
-                                 defaults=[SaveType.HEADER, SaveType.XY])
+                                 defaults=list(SaveType))
 
     @property
     def datacount(self) -> int:

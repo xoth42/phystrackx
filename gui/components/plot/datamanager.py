@@ -28,6 +28,7 @@ class DataManager:
         self.fheight: float = 0.0
         self.fps: int = 1
         self.scale: float = 1.0
+        self.unit: str = "px"  # Unit of the physical values (the ruler's unit, or px)
         self.scale_applied: bool = False
 
         self.datacount: int = 0
@@ -41,7 +42,8 @@ class DataManager:
         self.processed_points: list[np.ndarray] = []
 
     def load_data(self, tpoints: list[list[FPoint]], ocrdata: OCRData, axes: Axes, vwidth: float,
-                 vheight: float, fwidth: float, fheight: float, fps: int, scale: float) -> bool:
+                 vheight: float, fwidth: float, fheight: float, fps: int, scale: float,
+                 unit: str = "px") -> bool:
         """
         Populates the tracking data and configuration settings.
         Handles internal exceptions to protect the main entry application.
@@ -56,6 +58,7 @@ class DataManager:
             fheight (float): Height of the image frame inside canvas.
             fps (int): Frames per second of the video.
             scale (float): Pixel-to-real-world scale factor.
+            unit (str): Unit of the physical values, shown on the plots.
         
         Returns:
             bool: True if data was successfully loaded and setup without errors, False otherwise.
@@ -70,6 +73,7 @@ class DataManager:
         self.fheight = fheight
         self.fps = fps
         self.scale = scale
+        self.unit = unit
         self.scale_applied = False
 
         self.datacount = len(tpoints)

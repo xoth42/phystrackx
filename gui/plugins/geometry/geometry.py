@@ -44,11 +44,13 @@ class Geometry:
         }
         self.toolbar = GeometryToolbar(self.canvas, actions)
 
-    def set_scale(self, scale: float) -> None:
+    def set_scale(self, scale: float, unit: str = "px") -> None:
         self.model.scale = scale
+        self.model.unit = unit
 
     def pack(self) -> None:
         """Enables interactive mode."""
+        self._active = True
         self.canvas.bind("<Button-1>", self._on_click)
         self.canvas.bind("<Motion>", self._on_drag)
         self.canvas.config(cursor="crosshair")
@@ -114,7 +116,13 @@ class Geometry:
         except Exception as err:
             messagebox.showerror("Error", f"Failed to save screenshot:\n{err}")
 
+    def cancel(self) -> None:
+        """Another tool was started: leave geometry mode (the triangles drawn so far are kept)."""
+        if getattr(self, "_active", False):
+            self.onexit()
+
     def onexit(self) -> None:
+        self._active = False
         self.toolbar.hide()
         self.canvas.unbind("<Button-1>")
         self.canvas.unbind("<Motion>")

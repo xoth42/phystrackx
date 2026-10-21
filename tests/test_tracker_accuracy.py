@@ -160,8 +160,28 @@ def test_fullres_region_maps_the_crop():
     h.check("uncropped clip covers the whole copy", region == (0, 0, 640, 480), str(region))
 
 
+def test_several_objects_track_the_same_as_one():
+    """Several objects are tracked in parallel threads: each must get exactly the positions it gets
+    when tracked alone."""
+    clip = make_clip()
+    work = tempfile.mkdtemp(dir=h.WORK_DIR)
+    r = Rigid(trimpath=os.path.join(work, "trim.mp4"), vwidth=W, vheight=H)
+    r.addvideo(clip)
+    x0, y0 = truth(0)
+    ball = NormalizedRect((x0 - R) / W, (y0 - R) / H, 2 * R / W, 2 * R / H)
+    corner = NormalizedRect(0.05, 0.05, 0.1, 0.1)
+    crop = _Crop(r.fwidth, r.fheight)
+    r.track(0, [ball], [], _NoFilter(), crop, None)
+    alone = [list(p) for p in r.trackpts[0]]
+    r.track(0, [ball, corner], [], _NoFilter(), crop, None)
+    together = [list(p) for p in r.trackpts[0]]
+    h.check("two objects in threads: the ball's positions are unchanged", alone == together,
+            f"first difference at {next((i for i, (a, b) in enumerate(zip(alone, together)) if a != b), None)}")
+    h.check("the second object is tracked too", sum(len(p) == 2 for p in r.trackpts[1]) > 0.9 * len(alone))
+
+
 if __name__ == "__main__":
     h.run_tests([test_raw_tracker_follows_the_ball, test_pipeline_at_native_size,
                  test_pipeline_when_the_viewer_downscales,
                  test_pipeline_full_resolution_when_the_viewer_downscales,
-                 test_fullres_region_maps_the_crop])
+                 test_fullres_region_maps_the_crop, test_several_objects_track_the_same_as_one])

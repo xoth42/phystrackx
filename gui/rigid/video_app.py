@@ -9,6 +9,7 @@ Author: Isam Balghari
 from typing import Optional, List
 import os
 import logging
+import threading
 import cv2
 from PIL import Image, ImageTk
 
@@ -44,8 +45,12 @@ class Video:
         self.filters = filters
 
         self.frame: Optional[any] = None
+        self.on_native_ready = None  # Called (from a worker thread) once the full-resolution copy exists
+        self._native_busy = False
         self.imgview = None
         self.tkimg = None
+        self._raw = None       # Last decoded frame and its index: panning and zooming do not
+        self._raw_idx = None   # change the frame, so it is not decoded again
 
         tempdir = "temp"
         os.makedirs(tempdir, exist_ok=True)
@@ -113,6 +118,7 @@ class Video:
             on_progress (callable, optional): Receives proxy encoding progress (0.0 to 1.0).
         """
         self.rigid.release()
+        self._raw = self._raw_idx = None  # A new clip: the cached frame is no longer valid
 
         if istrim:
             self.logger.info("Loading trim video")
@@ -156,14 +162,76 @@ class Video:
                 window of the frame is shown, stretched to fill the frame area.
         """
         self.frameidx = idx
-        frame = self.rigid.frame(index=self.frameidx)
-        frame = self.filters.apply_filter(frame)
+        if self._raw is None or self._raw_idx != idx:
+            self._raw = self.rigid.frame(index=self.frameidx)
+            self._raw_idx = idx
+        frame = self.filters.apply_filter(self._raw)
         self.frame = self.crop.apply_crop(frame)
 
-        self.show_array(self.frame, view)
+        native = self._native_picture(view)
+        self.show_array(self.frame, view, native=native)
 
-    def show_array(self, frame, view=None) -> None:
-        """Draws a processed (cropped) frame on the canvas, through the zoom and pan view."""
+    def _native_picture(self, view) -> Optional[any]:
+        """
+        When the view enlarges the picture, the shown pixels come from the full-resolution copy
+        (the proxy has fewer pixels, so enlarging it looks blurred). Returns the visible part of the
+        frame at full resolution, or None to show the proxy. The copy is made in the background
+        the first time it is needed; until then the proxy is shown.
+        """
+        if view is None or view.zoom * view.fit <= 1:
+            return None
+        if self.rigid.nativepath is None:
+            self._prepare_native()
+            return None
+        frame_h, frame_w = self.frame.shape[:2]
+        if view.zoom > 1:
+            x, y, w, h = view.window()
+        else:
+            x, y, w, h = 0, 0, frame_w, frame_h
+        # The clip is cut from the proxy: its frame i is source frame trimstart + i (when trimmed),
+        # and its pixels start at trimorigin in the proxy, plus any crop shown on top of it
+        ox, oy = self.trimorigin
+        if self.crop.croprect is not None:
+            ox, oy = ox + self.crop.croprect.xmin, oy + self.crop.croprect.ymin
+        source_frame = self.frameidx + (self.trimstart if self.istrimmed else 0)
+        if not self.istrimmed and self.rigid.active_duration:
+            source_frame = self.rigid.active_duration[self.frameidx]
+        part = self.rigid.native_region(source_frame, (ox + x, oy + y, w, h))
+        if part is None:
+            return None
+        return self.filters.apply_filter(part)
+
+    def _prepare_native(self) -> None:
+        """Builds the full-resolution copy on a worker thread, then tells the app it is ready."""
+        if self._native_busy:
+            return
+        self._native_busy = True
+
+        def work():
+            try:
+                self.rigid.ensure_native()
+            except Exception:
+                self.logger.exception("Could not make the full-resolution copy for zoomed views")
+            finally:
+                self._native_busy = False
+            if self.on_native_ready is not None and self.rigid.nativepath is not None:
+                self.on_native_ready()
+
+        threading.Thread(target=work, daemon=True).start()
+
+    @staticmethod
+    def _scale(img, size: tuple[int, int]):
+        """Resizes without smoothing when enlarging (pixels stay sharp, like macOS zoom), and
+        averages when shrinking (so detail is not lost to aliasing)."""
+        enlarging = size[0] >= img.shape[1] and size[1] >= img.shape[0]
+        return cv2.resize(img, size, interpolation=cv2.INTER_NEAREST if enlarging else cv2.INTER_AREA)
+
+    def show_array(self, frame, view=None, native=None) -> None:
+        """Draws a processed (cropped) frame on the canvas, through the zoom and pan view.
+
+        native: the visible part of the frame at full resolution (see _native_picture), which is
+        drawn instead of the proxy's pixels.
+        """
         # An empty frame comes from a clip that failed to load. Drawing it raises inside the Tk
         # callback, so skip this redraw and keep the last picture on screen.
         if frame is None or frame.size == 0:
@@ -176,24 +244,28 @@ class Video:
         shown = frame
         if view is not None:
             view.configure(view.origin, (frame.shape[1], frame.shape[0]))
+        if native is not None and native.size > 0:
+            shown = self._scale(native, out)
+        elif view is not None:
             if view.zoom > 1:
                 x, y, w, h = view.window()
                 part = frame[y:y + h, x:x + w]
                 if part.size == 0:
                     self.logger.warning("Skipping redraw: the zoom window is outside the frame")
                     return
-                shown = cv2.resize(part, out, interpolation=cv2.INTER_LINEAR)
+                shown = self._scale(part, out)
             elif fit != 1:
-                shown = cv2.resize(frame, out, interpolation=cv2.INTER_LINEAR)
+                shown = self._scale(frame, out)
 
         img = Image.fromarray(cv2.cvtColor(shown.copy(), cv2.COLOR_BGR2RGB))
-        self.tkimg = ImageTk.PhotoImage(image=img)
+        self.tkimg = ImageTk.PhotoImage(image=img)  # Making a new one is faster than paste()
 
         self.canvas.coords(self.imgview, self.crop.cropx, self.crop.cropy)
         self.canvas.itemconfig(self.imgview, image=self.tkimg)
 
     def track(self, track_rects: Rect, ocr_rects: Rect, progress: IntVar, on_frame=None,
-              should_stop=None, fullres: bool = False, on_tracking=None) -> None:
+              should_stop=None, fullres: bool = False, on_tracking=None, filters=None,
+              assist: bool = False) -> None:
         """
         Perform object tracking on the video using selected regions.
 
@@ -204,6 +276,10 @@ class Video:
             fullres (bool): Track at the source's full size. The full-size copy is made first
                 if it does not exist yet; progress covers that step.
             on_tracking (callable, optional): Called once the tracker starts reading frames.
+            filters (optional): The filter to apply, taken on the UI thread (Filters.snapshot()).
+                This runs on a worker thread, where the live Filters plugin (Tk variables) must
+                not be read.
+            assist (bool): Use Segment Anything on hard frames (see experiments/rigid/assist.py).
         """
         self.logger.info("Starting tracking at frame index: %d", self.frameidx)
         self.logger.info("Tracking rectangles: ")
@@ -225,9 +301,20 @@ class Video:
         if on_tracking is not None:
             on_tracking()
 
-        self.rigid.track(self.frameidx, track_rects.rects, ocr_rects.rects, self.filters,
+        engine = None
+        if assist:
+            from media.segmenter import default_segmenter
+            from experiments.rigid.assist import HardEngine
+            segmenter = default_segmenter()
+            if segmenter is None:
+                self.logger.warning("Assist is on, but the Segment Anything model is not installed "
+                                    "(run phystrackx.py --download-models); tracking without it.")
+            else:
+                engine = HardEngine(segmenter)
+        self.rigid.track(self.frameidx, track_rects.rects, ocr_rects.rects,
+                         filters if filters is not None else self.filters,
                          self.crop, progress, on_frame=on_frame, should_stop=should_stop,
-                         fullres=source)
+                         fullres=source, assist=engine)
 
     def clear(self) -> None:
         """

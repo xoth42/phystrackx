@@ -63,6 +63,13 @@ class MLTracker:
         self.tracker.init(initial_frame, bbox)
         self.logger.info(f"Deep learning {self.tracking_type} engine successfully initialized on custom user ROI.")
 
+    def score(self) -> float:
+        """The tracker's confidence in its last update (1.0 when the tracker has no score)."""
+        try:
+            return float(self.tracker.getTrackingScore())
+        except (AttributeError, cv2.error):
+            return 1.0
+
     def update_tracker(self, frame: cv2.Mat) -> tuple[bool, PixelRect]:
         """
         Tracks the object in the current frame.

@@ -41,6 +41,25 @@ class ViewTransform:
         self.ox, self.oy = cx - w / 2, cy - h / 2
         self._clamp()
 
+    def zoom_at(self, x: float, y: float, zoom: float) -> None:
+        """Changes zoom keeping the picture point under canvas position (x, y) where it is."""
+        ox0, oy0 = self.origin
+        m = self.zoom * self.fit
+        fx = (x - ox0) / m + self.ox  # Crop-frame pixel under the pointer
+        fy = (y - oy0) / m + self.oy
+        self.zoom = min(max(zoom, 1.0), self.MAX_ZOOM)
+        m = self.zoom * self.fit
+        self.ox = fx - (x - ox0) / m
+        self.oy = fy - (y - oy0) / m
+        self._clamp()
+
+    def pan(self, dx: float, dy: float) -> None:
+        """Moves the picture by (dx, dy) canvas pixels: positive moves it right and down."""
+        m = self.zoom * self.fit
+        self.ox -= dx / m
+        self.oy -= dy / m
+        self._clamp()
+
     def set_fraction(self, fx: float, fy: float) -> None:
         """Pans using 0..1 fractions of the scrollable range (0 = left/top edge)."""
         w, h = self._window_size()

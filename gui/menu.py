@@ -86,9 +86,12 @@ class MenuScreen:
         self.root = ctk.CTk()
         self.root.title("PhysTrackX")
         
-        self.width = 1280
-        self.height = 720
-        self.root.geometry(f"{self.width}x{self.height}")
+        # Keep the whole window on screen: the menu bar (top) and the dock (bottom) take room
+        screen_w = self.root.winfo_screenwidth()
+        screen_h = self.root.winfo_screenheight()
+        self.width = min(1280, screen_w - 40)
+        self.height = min(720, screen_h - 160)
+        self.root.geometry(f"{self.width}x{self.height}+20+40")
         self.root.update_idletasks()
         
         self.width = self.root.winfo_width()

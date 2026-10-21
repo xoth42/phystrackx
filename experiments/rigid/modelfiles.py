@@ -31,6 +31,15 @@ NANOTRACK_MODELS = {
     ),
 }
 
+# Segment Anything (ViT-B) checkpoint, from Meta AI: finds objects from clicks or a box
+SAM_MODELS = {
+    "models/sam_vit_b_01ec64.pth": (
+        "https://dl.fbaipublicfiles.com/segment_anything/sam_vit_b_01ec64.pth",
+        "ec2df62732614e57411cdcf32a23ffdf28910380d03139ee0f4fcbe91eb8c912",
+    ),
+}
+ALL_MODELS = {**NANOTRACK_MODELS, **SAM_MODELS}
+
 logger = logging.getLogger(__name__)
 
 
@@ -79,17 +88,17 @@ def missing_models(relpaths: list[str]) -> list[str]:
 
 
 def ensure_models(relpaths: list[str]) -> None:
-    """Downloads any of the given NanoTrack models that are not present. Safe to call from a
+    """Downloads any of the given model files that are not present. Safe to call from a
     worker thread (it does not touch Tk)."""
     for rel in missing_models(relpaths):
-        if rel not in NANOTRACK_MODELS:
+        if rel not in ALL_MODELS:
             raise FileNotFoundError(f"No download source is known for {rel}.")
-        url, sha = NANOTRACK_MODELS[rel]
+        url, sha = ALL_MODELS[rel]
         logger.info(f"Tracking model not found; downloading {rel}")
         _download(url, abspath(rel), sha)
         logger.info(f"Saved {rel}")
 
 
 def download_all() -> None:
-    """Downloads every NanoTrack model that is missing (used by --download-models)."""
-    ensure_models(list(NANOTRACK_MODELS))
+    """Downloads every model that is missing (used by --download-models)."""
+    ensure_models(list(ALL_MODELS))

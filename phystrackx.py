@@ -12,7 +12,7 @@ import signal
 
 import customtkinter as ctk
 from gui.menu import MenuScreen
-from core import session, setup_logging
+from core import crash, session, setup_logging
 
 
 class GUI:
@@ -31,6 +31,7 @@ class GUI:
         self.menu = MenuScreen(skip_intro=self.skip_intro, video_path=self.video_path,
                                project_path=self.project_path)
         root = self.menu.root
+        crash.install_tk(root)
 
         # Tk swallows KeyboardInterrupt raised inside its callbacks, so Ctrl-C asks the loop to
         # stop instead. The short timer keeps Python running often enough to see the signal.
@@ -88,6 +89,7 @@ def main() -> None:
     """Runs the PhysTrackX GUI application."""
     args = parse_args()
     setup_logging()
+    crash.install()  # Tracebacks for every failure, including crashes inside C code
 
     if args.download_models:
         from experiments.rigid.modelfiles import download_all

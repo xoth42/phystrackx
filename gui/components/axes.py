@@ -6,12 +6,16 @@ Defines the Axes class that manages coordinate transformations and GUI-based axi
 Author: Isam Balghari
 """
 
+import tkinter as tk
+
 import numpy as np
 import customtkinter as ctk
 from .anglecontrol import AngleControl
 from .buttons import SubmitButton
 
 class Axes:
+    DRAG_TOLERANCE = 10  # Screen pixels from the origin or an axis line that start a drag
+
     def __init__(self, root, canvas, vwidth: int, vheight: int, btnlist: dict,
                  activebtn: ctk.CTkButton):
         self.root = root
@@ -32,7 +36,10 @@ class Axes:
         self.applybtn = SubmitButton(self.canvas, command=self.onapply, size=50,
                                      tooltip="Apply Axes")
         self.on_cancel = None  # Optional callback when selection is aborted (used to leave marking)
-        self._selecting = False
+        self._selecting = False  # True while the axis tool is open (placing or editing)
+        self._before = (self.ox, self.oy, 0.0, False)  # Axes when the tool opened, for cancel
+        self._dragging = None  # (dx, dy) from the pointer to the origin while dragging
+        self._items = None  # Canvas ids of the two lines and two labels, reused while moving
 
     def get_state(self) -> dict:
         """Axes placement in canvas pixels, with the canvas size it was measured on."""
@@ -54,43 +61,131 @@ class Axes:
         self.placed = False
         self.theta.set(0)
         self.canvas.delete("axes")
+        self._items = None
 
         if self.angle is not None:
             self.angle.hide()
 
     def markaxes(self):
-        """Enable interactive marking of axes with mouse events."""
-        self.canvas.delete("oval")
-        self.canvas.delete("axes")
-        self.canvas.bind("<Motion>", self.onmove)
-        self.canvas.bind("<Button-1>", self.onclick)
-        self._toplevel().bind("<Escape>", self.cancelaxes)
+        """
+        Opens the axis tool. Without axes yet, they follow the pointer until a click places the
+        origin. With axes already placed, they can be dragged straight away. Either way they can
+        then be dragged by the origin or by either axis, the rotation bar turns them, and Apply
+        ends the tool.
+        """
+        self._before = (self.ox, self.oy, self.theta.get(), self.placed)
         self._selecting = True
-
-        for k, btn in self.btnlist.items():
+        self._toplevel().bind("<Escape>", self.cancelaxes)
+        for btn in self.btnlist.values():
             if btn != self.activebtn:
                 btn.configure(state="disabled")
+
+        if self.placed:
+            self._start_editing()
+        else:
+            self.canvas.delete("oval")
+            self.canvas.delete("axes")
+            self.canvas.bind("<Motion>", self.onmove)
+            self.canvas.bind("<Button-1>", self.onclick)
 
     def _toplevel(self):
         """The window that receives key presses (the frame holding the canvas does not)."""
         return self.canvas.winfo_toplevel()
 
-    def cancelaxes(self, event=None):
-        """Escape while choosing the origin: stop choosing, keep any axes already placed."""
-        if not self._selecting:
-            return
-        self._selecting = False
+    def _start_editing(self) -> None:
+        """Placed axes: drag them to move, turn them with the bar, then Apply."""
         self.canvas.unbind("<Motion>")
-        self.canvas.unbind("<Button-1>")
-        self._toplevel().unbind("<Escape>")
-        self.canvas.delete("axes")
-        if self.placed:
-            self.rotate()  # Put back the axes that were there before
+        self.canvas.bind("<Button-1>", self._on_press)
+        self.canvas.bind("<B1-Motion>", self._on_drag)
+        self.canvas.bind("<ButtonRelease-1>", self._on_release)
+        self.applybtn.pack(side="right", padx=10, pady=10, anchor="se")
+        # Strip below the video (not over it), so the picture stays visible. The narrow bar gives
+        # fine control; the text box covers larger angles. Made once and reused.
+        if self.angle is None:
+            self.angle = AngleControl(self.root, self.theta, self.rotate)
+        self.angle.show(before=self.canvas)
+        self.rotate()
 
+    def _unbind(self) -> None:
+        for sequence in ("<Motion>", "<Button-1>", "<B1-Motion>", "<ButtonRelease-1>"):
+            self.canvas.unbind(sequence)
+        self._toplevel().unbind("<Escape>")
+
+    def _end_tool(self) -> None:
+        self._selecting = False
+        self._dragging = None
+        self._unbind()
+        self.applybtn.pack_forget()
+        if self.angle is not None:
+            self.angle.hide()
         for btn in self.btnlist.values():
             btn.configure(state="normal")
+
+    def cancelaxes(self, event=None):
+        """Escape, or another tool started: the axes go back to how they were when the tool
+        opened (none, if there were none)."""
+        if not self._selecting:
+            return
+        self._end_tool()
+        ox, oy, theta, placed = self._before
+        self.ox, self.oy, self.placed = ox, oy, placed
+        self.theta.set(theta)
+        if self.placed:
+            self.rotate()
+        else:
+            self.canvas.delete("axes")
         if self.on_cancel:
             self.on_cancel()
+
+    # ---------------------------------------------------------------------------------------------
+    # Dragging
+    def _base(self, x: float, y: float) -> tuple[float, float]:
+        return self.view.to_base(x, y) if self.view is not None else (x, y)
+
+    def _screen_origin(self) -> tuple[float, float]:
+        if self.view is not None:
+            return self.view.to_canvas(self.ox, self.oy)
+        return self.ox, self.oy
+
+    def _directions(self):
+        """Unit canvas directions of the x and y axes at the current angle."""
+        theta_rad = -np.deg2rad(self.theta.get())
+        dirs = []
+        for vec in ((1.0, 0.0), (0.0, 1.0)):
+            dx, dy = self._canvas_dir(*self.rotatez(*vec, theta_rad))
+            norm = np.hypot(dx, dy) or 1.0
+            dirs.append((dx / norm, dy / norm))
+        return dirs
+
+    def _hits_axes(self, x: float, y: float) -> bool:
+        """True when the screen point is on the origin or on either axis (within a few pixels)."""
+        sx, sy = self._screen_origin()
+        vx, vy = x - sx, y - sy
+        tol = self.DRAG_TOLERANCE
+        if np.hypot(vx, vy) <= 1.5 * tol:
+            return True
+        for dx, dy in self._directions():
+            along = vx * dx + vy * dy
+            if along >= -tol and abs(vx * dy - vy * dx) <= tol:
+                return True
+        return False
+
+    def _on_press(self, event) -> None:
+        if not self._hits_axes(event.x, event.y):
+            self._dragging = None
+            return
+        bx, by = self._base(event.x, event.y)
+        self._dragging = (self.ox - bx, self.oy - by)
+
+    def _on_drag(self, event) -> None:
+        if self._dragging is None:
+            return
+        bx, by = self._base(event.x, event.y)
+        self.ox, self.oy = bx + self._dragging[0], by + self._dragging[1]
+        self.rotate()
+
+    def _on_release(self, event) -> None:
+        self._dragging = None
 
     def drawaxes(self, startx, starty, xp, yp):
         """Draw x and y axes lines with arrow heads and labels.
@@ -103,15 +198,26 @@ class Axes:
         x0, y0 = xp
         x1, y1 = yp
 
-        self.canvas.create_line(sx0, sy0, x0, y0, fill="red", arrow=ctk.LAST,
-                                width=2, tags="axes")
-        self.canvas.create_line(sx1, sy1, x1, y1, fill="blue", arrow=ctk.LAST,
-                                width=2, tags="axes")
-
-        self.canvas.create_text(x0 - 15, y0 - 15, text="x", fill="red",
-                                font=("Arial", 15, "bold"), tags="axes")
-        self.canvas.create_text(x1 + 15, y1 - 15, text="y", fill="blue",
-                                font=("Arial", 15, "bold"), tags="axes")
+        # The items are made once and then moved: deleting and recreating them on every pointer
+        # move made dragging and the preview lag
+        items = self._items
+        if items is None or not self.canvas.type(items[0]):
+            self._items = (
+                self.canvas.create_line(sx0, sy0, x0, y0, fill="red", arrow=ctk.LAST,
+                                        width=2, tags="axes"),
+                self.canvas.create_line(sx1, sy1, x1, y1, fill="blue", arrow=ctk.LAST,
+                                        width=2, tags="axes"),
+                self.canvas.create_text(x0 - 15, y0 - 15, text="x", fill="red",
+                                        font=("Arial", 15, "bold"), tags="axes"),
+                self.canvas.create_text(x1 + 15, y1 - 15, text="y", fill="blue",
+                                        font=("Arial", 15, "bold"), tags="axes"),
+            )
+            return
+        xline, yline, xtext, ytext = items
+        tk.Canvas.coords(self.canvas, xline, sx0, sy0, x0, y0)
+        tk.Canvas.coords(self.canvas, yline, sx1, sy1, x1, y1)
+        tk.Canvas.coords(self.canvas, xtext, x0 - 15, y0 - 15)
+        tk.Canvas.coords(self.canvas, ytext, x1 + 15, y1 - 15)
 
     def canvas2reg(self, xc, yc, tx, ty):
         """Convert canvas coordinates to regular (math) frame."""
@@ -128,7 +234,6 @@ class Axes:
 
     def rotate(self, event=None):
         """Redraw axes based on the current rotation angle."""
-        self.canvas.delete("axes")
 
         theta_rad = -np.deg2rad(self.theta.get())
         # Canvas direction of each axis (y points down on screen, so the regular y flips)
@@ -188,37 +293,21 @@ class Axes:
 
     def onmove(self, event):
         """Update axes preview to follow mouse position."""
-        self.canvas.delete("axes")
 
         # Unrotated preview: x along +x, y along -y (up the screen)
         self._draw_from(event.x, event.y, (1.0, 0.0), (0.0, -1.0))
 
     def onclick(self, event):
-        """Finalize axis origin selection and show slider for rotation."""
-        self.ox, self.oy = event.x, event.y
-        if self.view is not None:
-            self.ox, self.oy = self.view.to_base(event.x, event.y)
+        """Places the origin where the user clicked. The axes can then be dragged and turned."""
+        self.ox, self.oy = self._base(event.x, event.y)
         self.placed = True
-        self._selecting = False
-        self.canvas.unbind("<Motion>")
-        self.canvas.unbind("<Button-1>")
-        self._toplevel().unbind("<Escape>")
-
-        self.applybtn.pack(side="right", padx=10, pady=10, anchor="se")
-
-        # Strip below the video (not over it), so the picture stays visible
-        # Strip below the video (not over it), so the picture stays visible.
-        # The narrow bar gives fine control; the text box covers larger angles.
-        self.angle = AngleControl(self.root, self.theta, self.rotate)
-        self.angle.show(before=self.canvas)
+        if not self._selecting:  # Placed directly (not from the tool): still allow editing
+            self._before = (self.ox, self.oy, self.theta.get(), False)
+            self._selecting = True
+        self._start_editing()
 
     def onapply(self):
         """Finalize axis placement and restore other UI buttons."""
-        self.angle.hide()
-        self.applybtn.pack_forget()
-
-        for btn in self.btnlist.values():
-            btn.configure(state="normal")
-
+        self._end_tool()
         if self.on_apply:
             self.on_apply()

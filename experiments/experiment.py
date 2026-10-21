@@ -19,6 +19,7 @@ import numpy as np
 
 from media.videoreader import VideoReader
 from media import proxyvideo, trimvideo
+from media.proxyvideo import source_is_plain
 
 
 # -------------------------------------------------------------------------------------------------
@@ -33,6 +34,8 @@ class Experiment:
         self._setup_logging()
 
         self._vidreader: VideoReader | None = None
+        self._nativereader: VideoReader | None = None  # Full-resolution copy, for zoomed views
+        self._native_cache: tuple | None = None  # (frame index, decoded frame): reused while panning
         self.fwidth: int = 0
         self.fheight: int = 0
         self.fps: int = 0
@@ -148,6 +151,13 @@ class Experiment:
         """
         if not self.sourcepath:
             raise RuntimeError("No source video to make a full-resolution copy from.")
+        # A source with even size and no rotation already holds these pixels: read it directly
+        # instead of encoding a copy of it (which takes as long as the proxy did).
+        if source_is_plain(self.sourcepath):
+            self.nativepath = self.sourcepath
+            if on_progress:
+                on_progress(1.0)
+            return self.sourcepath
         # iw and ih are the source size after rotation, so the copy keeps the source's size
         native = proxyvideo(self.sourcepath, width="trunc(iw/2)*2", height="trunc(ih/2)*2",
                             on_progress=on_progress, total_frames=self.proxyfcount)
@@ -189,12 +199,46 @@ class Experiment:
         return self._vidreader.read(index)
 
     # ---------------------------------------------------------------------------------------------
+    def native_region(self, frameidx: int, region: tuple[int, int, int, int]) -> MatLike | None:
+        """
+        A region of a frame from the full-resolution copy, at the copy's own pixels.
+
+        Args:
+            frameidx (int): Frame of the source video (the proxy's frame numbers).
+            region (tuple): (x, y, w, h) in the proxy's pixels.
+
+        Returns:
+            The region as an image, or None when there is no copy yet or its frames do not match
+            the proxy's (so the proxy must be shown instead).
+        """
+        if not self.nativepath or not self.proxysize:
+            return None
+        if self._nativereader is None:
+            self._nativereader = VideoReader(self.nativepath)
+        native = self._nativereader
+        if native.fcount != self.proxyfcount:
+            return None
+
+        sx, sy = native.width / self.proxysize[0], native.height / self.proxysize[1]
+        x, y, w, h = region
+        x0, y0 = round(x * sx), round(y * sy)
+        x1, y1 = min(round((x + w) * sx), native.width), min(round((y + h) * sy), native.height)
+        if x1 <= x0 or y1 <= y0:
+            return None
+        if self._native_cache is None or self._native_cache[0] != frameidx:
+            self._native_cache = (frameidx, native.read(frameidx))
+        return self._native_cache[1][y0:y1, x0:x1]
+
     def release(self) -> None:
         """
         Release the video reader resources.
         """
         if self._vidreader:
             self._vidreader.release()
+        if self._nativereader:
+            self._nativereader.release()
+            self._nativereader = None
+        self._native_cache = None
 
     # ---------------------------------------------------------------------------------------------
     def crop_intime(self) -> None:

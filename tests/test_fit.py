@@ -214,8 +214,115 @@ def test_plot_slider_updates_the_fit():
     plt.close("all")
 
 
+def test_quadratic_drag_recovers_the_parameters():
+    """Data from the quadratic-drag equation: the drag model must recover omega and the drag k."""
+    import time
+    from gui.components.plot.fit import drag, fit_model
+    t = np.arange(900) / 30
+    y = drag(t, 60.0, 0.0, 1.2, 0.02, 120.0)
+    y = y + np.random.default_rng(3).normal(0, 0.3, t.size)
+    start = time.time()
+    fit = fit_model(t, y, "drag")
+    took = time.time() - start
+    h.check("drag fit converges", fit.ok, fit.message)
+    h.check("drag fit R² is high", fit.r2 > 0.98, f"R² {fit.r2:.4f}")
+    h.check("drag omega is recovered within 2%",
+            abs(fit.params["omega"] - 1.2) / 1.2 < 0.02, f"{fit.params['omega']:.4f}")
+    h.check("drag strength k is recovered within 25%",
+            abs(fit.params["k"] - 0.02) / 0.02 < 0.25, f"{fit.params['k']:.4f}")
+    h.check("drag fit is quick enough for the slider", took < 5.0, f"{took:.2f} s")
+
+
+def test_quadratic_drag_with_drift_recovers_the_slope():
+    from gui.components.plot.fit import drag_linear, fit_model
+    t = np.arange(900) / 30
+    y = drag_linear(t, 60.0, 0.0, 1.2, 0.02, 120.0, 0.4)
+    y = y + np.random.default_rng(4).normal(0, 0.3, t.size)
+    fit = fit_model(t, y, "drag_linear")
+    h.check("drag + drift converges", fit.ok, fit.message)
+    h.check("drag + drift slope is recovered", abs(fit.params["m"] - 0.4) < 0.02,
+            f"{fit.params['m']:.4f}")
+    h.check("drag + drift omega is recovered within 3%",
+            abs(fit.params["omega"] - 1.2) / 1.2 < 0.03, f"{fit.params['omega']:.4f}")
+
+
+def test_plot_offers_the_drag_models():
+    import matplotlib.pyplot as plt
+    from gui.components.plot.plot import Plot
+    from gui.components.plot.fit import MODELS
+
+    class _Data:
+        pass
+
+    t = np.arange(600) / 30
+    y = damped(t, A, GAMMA, OMEGA, PHI, C)
+    data = _Data()
+    data.processed_points = [np.column_stack([np.zeros_like(y), y])]
+    data.timestamps = t
+    data.unit = "cm"
+    plot = Plot.__new__(Plot)
+    plot.datamanager = data
+    plot._widgets = []
+    plot.ploty()
+    radio = plot._widgets[-1]
+    ax = plt.gcf().axes[0]
+    text = lambda: "\n".join(tx.get_text() for tx in ax.texts)  # noqa: E731
+    h.check("the fit menu lists 4 models", len(MODELS) == 4, str(list(MODELS)))
+    radio.set_active(list(MODELS).index("drag"))
+    h.check("the drag model shows its drag strength k", "k     =" in text(), text()[:120])
+    h.check("the drag model has no gamma line", "gamma =" not in text())
+    plt.close("all")
+
+
+def test_initial_drop_is_high_to_first_low():
+    """A motion that starts high and falls: the drop runs from the first high to the first low."""
+    from gui.components.plot.fit import initial_drop
+    t = np.arange(0, 6, 1 / 30)
+    y = 50 + 40 * np.cos(2 * math.pi * 0.5 * t)  # Starts at 90 (high), first low at t = 1 s, value 10
+    drop = initial_drop(t, y)
+    h.check("initial drop is found", drop.ok, drop.message)
+    h.check("the start is the first high", abs(drop.t_high) < 0.05 and abs(drop.y_high - 90) < 0.5,
+            f"t {drop.t_high:.3f}, y {drop.y_high:.2f}")
+    h.check("the low is the first turnaround", abs(drop.t_low - 1.0) < 0.05 and
+            abs(drop.y_low - 10) < 0.5, f"t {drop.t_low:.3f}, y {drop.y_low:.2f}")
+    h.check("drop and duration are right", abs(drop.drop - 80) < 1 and abs(drop.duration - 1.0) < 0.05,
+            f"drop {drop.drop:.2f}, duration {drop.duration:.3f}")
+
+
+def test_plot_shows_drop_markers_and_a_legend():
+    import matplotlib.pyplot as plt
+    from gui.components.plot.plot import Plot
+
+    class _Data:
+        pass
+
+    t = np.arange(600) / 30
+    y = 50 + 40 * np.cos(2 * math.pi * 0.5 * t)
+    data = _Data()
+    data.processed_points = [np.column_stack([np.zeros_like(y), y])]
+    data.timestamps = t
+    data.unit = "cm"
+    plot = Plot.__new__(Plot)
+    plot.datamanager = data
+    plot._widgets = []
+    plot.ploty()
+    ax = plt.gcf().axes[0]
+    texts = "\n".join(tx.get_text() for tx in ax.texts)
+    h.check("the plot reports the initial drop", "Initial drop =" in texts, texts[-120:])
+    legend = ax.get_legend()
+    labels = [tx.get_text() for tx in legend.get_texts()] if legend else []
+    h.check("the plot has a legend with the fit and the drop", "fit" in labels and
+            "initial drop" in labels, str(labels))
+    h.check("the legend is placed automatically", legend is not None and legend._loc == 0,
+            f"loc {legend._loc if legend else None}")
+    plt.close("all")
+
+
 if __name__ == "__main__":
     h.run_tests([test_fit_recovers_the_parameters, test_linear_drift_model_recovers_the_slope, test_plot_fit_type_switch, test_distance_r_is_csv_column_and_plot, test_warm_start_gives_the_same_fit, test_peak_spacing_agrees_with_the_fit,
                  test_best_period_prefers_a_good_fit, test_best_period_falls_back_to_peaks_for_a_poor_fit,
                  test_range_uses_only_the_selected_part, test_too_few_points_is_refused,
-                 test_plot_slider_updates_the_fit])
+                 test_plot_slider_updates_the_fit,
+                 test_quadratic_drag_recovers_the_parameters, test_quadratic_drag_with_drift_recovers_the_slope,
+                 test_plot_offers_the_drag_models, test_initial_drop_is_high_to_first_low,
+                 test_plot_shows_drop_markers_and_a_legend])

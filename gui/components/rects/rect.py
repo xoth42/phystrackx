@@ -296,6 +296,12 @@ class Rect:
         self.bin_button.pack(anchor=tk.N, pady=10)
         self._select(box)
 
+    def cancel(self):
+        """Another tool was started: this marking session ends. The boxes drawn so far are kept,
+        as if Apply had been pressed."""
+        if self._session:
+            self.onapply()
+
     def onapply(self):
         """Finalize rects and colors on apply, and end the marking session"""
         self._session = False
