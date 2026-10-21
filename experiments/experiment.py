@@ -211,6 +211,17 @@ class Experiment:
             The region as an image, or None when there is no copy yet or its frames do not match
             the proxy's (so the proxy must be shown instead).
         """
+        found = self.native_region_at(frameidx, region)
+        return None if found is None else found[0]
+
+    def native_region_at(self, frameidx: int, region: tuple[int, int, int, int]):
+        """
+        Like native_region, but also says where the image sits, so it can be drawn exactly.
+
+        Returns:
+            (image, x0, y0, sx, sy), or None as native_region does. x0 and y0 are the image's
+            top-left corner in the copy's pixels, and sx and sy are copy pixels per proxy pixel.
+        """
         if not self.nativepath or not self.proxysize:
             return None
         if self._nativereader is None:
@@ -227,7 +238,7 @@ class Experiment:
             return None
         if self._native_cache is None or self._native_cache[0] != frameidx:
             self._native_cache = (frameidx, native.read(frameidx))
-        return self._native_cache[1][y0:y1, x0:x1]
+        return self._native_cache[1][y0:y1, x0:x1], x0, y0, sx, sy
 
     def release(self) -> None:
         """

@@ -41,7 +41,7 @@ def test_native_crash_prints_the_python_stack():
             "    ctypes.string_at(0)\n"
             "inside_tracking()\n")
     result = subprocess.run([sys.executable, "-c", code], capture_output=True, text=True,
-                            cwd=h.REPO, timeout=60)
+                            cwd=h.RUN_CWD, env=h.child_env(), timeout=60)
     out = result.stderr
     if "Fatal Python error" not in out and os.path.exists(crash.CRASH_LOG):
         with open(crash.CRASH_LOG, encoding="utf-8") as f:

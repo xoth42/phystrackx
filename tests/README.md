@@ -8,6 +8,10 @@ Run one module:
 
     uv run python -m tests.run_all test_rect_editing
 
+Modules run four at a time (`--jobs 1` runs them one after another). Each one gets its own run
+folder for clips, proxies and logs, which is removed when it passes; a failing module's folder is
+kept and named in the output.
+
 ## What is covered
 
 | Module | Needs a window | Covers |
@@ -30,6 +34,11 @@ Run one module:
 | `test_navigation` | yes | trackpad and wheel pan in both directions, Cmd +/- zoom around the pointer, Cmd 0 back to the whole picture, a scroll burst draws once, axes drag by the origin and keep their angle, window title shows project and video |
 | `test_trim_again` | yes | a second trim (with crop) is recorded in full-video frames; a failed trim keeps the current clip |
 | `test_tracking` | yes | live frames, refused second run, stop keeps results, manual positions |
+| `test_overlay_geometry` | yes | a synthetic frame is drawn at many zooms, pans, window sizes and frame offsets, through both the proxy and the full-resolution path; each square's drawn centre must be within 1 px of where the overlay transform puts it |
+| `test_overlay_alignment` | yes | the same check on a real rotated clip with two markers (the markers' positions are only known to about half a frame pixel, so it catches gross scale and offset errors) |
+| `test_tracker_scenarios` | no | ten synthetic scenarios from easy (white screen) to extreme (camouflage with look-alikes and occluders), plus a hand drop; the circle-selected ball is tracked and compared with its true path. Two are marked as known weaknesses with a floor. `uv run python -m tests.benchmark_report` writes a page with a player and error chart for each |
+| `test_start_view` | yes | a rotated phone-style clip opens whole: the drawn picture lies inside the video area, fills one side, and is the frame scaled by the view fit |
+| `test_window_features` | yes | File menu and Open Recent; Clear Data; dark text on the cyan strips; resizing the window re-fits the picture and keeps the ruler on it; a .phystrack given as --video opens as a project |
 | `test_tracker_accuracy` | no | tracker follows a synthetic ball with known path; pipeline keeps points on the ball at native size, when downscaled, and when tracking the full-resolution copy at a downscaled view; full-size region maps the crop |
 
 ## Notes

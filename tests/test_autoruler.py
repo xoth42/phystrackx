@@ -125,9 +125,10 @@ def test_segment_anything_snaps_to_the_left_edge():
             f"{q1} {q2} vs {[tuple(np.round(p, 1)) for p in left]}")
 
 
-def test_auto_ruler_button_runs_off_the_ui_thread():
-    """The button finds the object on a worker thread, shows that it is busy, then moves the ruler
-    and enables Undo."""
+def test_auto_ruler_button_is_quick():
+    """The button finds the object on the UI thread in well under a second, moves the ruler, and
+    enables Undo."""
+    import time
     import customtkinter as ctk
     from gui.components.ruler import ScaleRuler
     img, corners, *_ = _bar()
@@ -141,15 +142,18 @@ def test_auto_ruler_button_runs_off_the_ui_thread():
     ruler.frame_source = lambda: img
     ruler.p1, ruler.p2 = [222.0, 120.0], [218.0, 480.0]
     ruler.pack()
+    started = time.time()
     ruler.autosnap()
-    h.check("the button shows it is busy", ruler.autobtn.cget("text") == "Finding...")
-    h.pump(root, lambda: not ruler._snapping, timeout=120)
+    elapsed = time.time() - started
+    h.check("Auto Ruler takes under a second", elapsed < 1.0, f"{elapsed:.2f} s")
     left = _left_corners(corners)
     h.check("the ruler moved onto the bar's left corners",
             _close_to_any(ruler.p1, left, 4.0) and _close_to_any(ruler.p2, left, 4.0),
             f"{ruler.p1} {ruler.p2}")
     h.check("Undo is available after the snap", str(ruler.undobtn.cget("state")) == "normal")
     h.check("the button is back to normal", ruler.autobtn.cget("text") == "Auto Ruler")
+    ruler.undo_autosnap()
+    h.check("Undo puts the ruler back", ruler.p1 == [222.0, 120.0] and ruler.p2 == [218.0, 480.0])
     ruler.clear()
     root.destroy()
 
@@ -158,4 +162,4 @@ if __name__ == "__main__":
     h.run_tests([test_snaps_to_the_left_edge_of_a_straight_bar, test_keeps_the_order_of_the_ends,
                  test_right_side_snaps_to_the_right_edge, test_tilted_bar_follows_its_own_edge,
                  test_no_object_under_the_ruler_is_refused, test_short_ruler_is_refused,
-                 test_segment_anything_snaps_to_the_left_edge, test_auto_ruler_button_runs_off_the_ui_thread])
+                 test_segment_anything_snaps_to_the_left_edge, test_auto_ruler_button_is_quick])

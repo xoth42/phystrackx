@@ -154,8 +154,9 @@ def _object_rows(frame, size: int, half_width: float, outline=None):
         # The background of each row: the picture just outside the ruler's width
         background = np.median(np.concatenate([frame[:, left_strip], frame[:, right_strip]],
                                               axis=1), axis=1)
-        diff = frame - background[:, None, :]
-        distance = np.sqrt(diff[..., 0] ** 2 + 4.0 * (diff[..., 1] ** 2 + diff[..., 2] ** 2))
+        # Colour only (Lab a and b): shadows and pale tape change lightness, not colour
+        diff = frame[..., 1:] - background[:, None, 1:]
+        distance = np.sqrt(diff[..., 0] ** 2 + diff[..., 1] ** 2)
 
         band = slice(max(int(cx - 2 * half_width - 6), 0), min(int(cx + 2 * half_width + 6), size))
         mask = np.zeros((size, size), np.uint8)

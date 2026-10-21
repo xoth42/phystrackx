@@ -21,7 +21,10 @@ REPO = os.path.abspath(os.path.join(TESTS_DIR, os.pardir))
 if REPO not in sys.path:
     sys.path.insert(0, REPO)
 
-WORK_DIR = os.path.join(tempfile.gettempdir(), "phystrack_tests")
+# run_all gives each module its own run folder, so parallel modules do not share clips, proxies or
+# logs. Run on its own, a module uses the shared folder.
+WORK_DIR = os.environ.get("PHYSTRACK_TEST_RUN_DIR") or os.path.join(
+    tempfile.gettempdir(), "phystrack_tests")
 
 _passes = 0
 _failures: list[str] = []
@@ -30,7 +33,10 @@ DIALOGS: list[tuple] = []  # Message boxes raised by the app, recorded instead o
 
 def setup_env() -> None:
     """Runs from the repo root and points Tcl/Tk at the uv-managed Python if needed (macOS)."""
-    os.chdir(REPO)  # The app writes ./temp and ./logs relative to the working directory
+    # The app writes ./temp and ./logs relative to the working directory, so a run in its own
+    # folder keeps its files there. Resources are found from the project folder (core.abspath).
+    os.makedirs(WORK_DIR, exist_ok=True)
+    os.chdir(WORK_DIR if os.environ.get("PHYSTRACK_TEST_RUN_DIR") else REPO)
     if "TCL_LIBRARY" not in os.environ:
         hits = glob.glob(os.path.expanduser(
             "~/.local/share/uv/python/cpython-3.12*-macos*/lib/tcl9.0"))
@@ -41,6 +47,20 @@ def setup_env() -> None:
     # Test runs keep their projects out of the real projects/ folder
     import core.project as project
     project.PROJECTS_DIR = os.path.join(WORK_DIR, "projects")
+    # ...and out of the user's Open Recent list (~/.phystrackx/recent.json)
+    from core import recent
+    recent.RECENT_FILE = os.path.join(WORK_DIR, "recent.json")
+
+
+RUN_CWD = WORK_DIR if os.environ.get("PHYSTRACK_TEST_RUN_DIR") else REPO
+
+
+def child_env() -> dict:
+    """Environment for a test's own subprocess: it runs in RUN_CWD, so the project folder must be
+    on its import path."""
+    env = dict(os.environ)
+    env["PYTHONPATH"] = os.pathsep.join(p for p in (REPO, env.get("PYTHONPATH")) if p)
+    return env
 
 
 def say(*args) -> None:

@@ -7,10 +7,13 @@ Author: Isam Balghari
 """
 
 from typing import Optional, List
+import math
 import os
 import logging
 import threading
+from typing import NamedTuple
 import cv2
+import numpy as np
 from PIL import Image, ImageTk
 
 from customtkinter import CTkCanvas, IntVar
@@ -20,6 +23,17 @@ from gui.plugins.crop import Crop
 from gui.plugins.filters import Filters
 from gui.components.rects.rect import Rect
 from core import filexists
+
+
+class NativePart(NamedTuple):
+    """A piece of the full-resolution copy, with where it sits, so it is drawn exactly in place."""
+    image: any
+    x0: int        # Top-left of the image, in the copy's pixels
+    y0: int
+    sx: float      # Copy pixels per proxy pixel
+    sy: float
+    off_x: float   # Where the frame being shown starts in the proxy (trim origin plus crop)
+    off_y: float
 
 
 class Video:
@@ -49,6 +63,7 @@ class Video:
         self._native_busy = False
         self.imgview = None
         self.tkimg = None
+        self.drawn = None      # The picture last drawn (BGR array)
         self._raw = None       # Last decoded frame and its index: panning and zooming do not
         self._raw_idx = None   # change the frame, so it is not decoded again
 
@@ -136,6 +151,9 @@ class Video:
             self.logger.info("Video added from: %s", videopath)
             self.crop.set(self.fwidth, self.fheight)
 
+        # Until the proxy was ready the reader pointed at the source file, so a frame drawn in
+        # the meantime would be cached at the source's size
+        self._raw = self._raw_idx = None
         self.logger.info(f"Video loaded: {videopath}, Frame count: {self.fcount}, FPS: {self.fps},"
                          f"Width: {self.crop.cropwidth}, Height: {self.crop.cropheight}")
 
@@ -168,15 +186,22 @@ class Video:
         frame = self.filters.apply_filter(self._raw)
         self.frame = self.crop.apply_crop(frame)
 
-        native = self._native_picture(view)
-        self.show_array(self.frame, view, native=native)
+        if view is not None:
+            view.configure(view.origin, (self.frame.shape[1], self.frame.shape[0]))
+        self.show_array(self.frame, view, native=self._native_view(view))
 
     def _native_picture(self, view) -> Optional[any]:
+        """The image of _native_view, or None (the proxy is shown instead)."""
+        part = self._native_view(view)
+        return None if part is None else part.image
+
+    def _native_view(self, view) -> Optional[NativePart]:
         """
         When the view enlarges the picture, the shown pixels come from the full-resolution copy
         (the proxy has fewer pixels, so enlarging it looks blurred). Returns the visible part of the
-        frame at full resolution, or None to show the proxy. The copy is made in the background
-        the first time it is needed; until then the proxy is shown.
+        frame at full resolution, with a margin so it can be placed at a fraction of a pixel, or
+        None to show the proxy. The copy is made in the background the first time it is needed;
+        until then the proxy is shown.
         """
         if view is None or view.zoom * view.fit <= 1:
             return None
@@ -184,10 +209,11 @@ class Video:
             self._prepare_native()
             return None
         frame_h, frame_w = self.frame.shape[:2]
-        if view.zoom > 1:
-            x, y, w, h = view.window()
-        else:
-            x, y, w, h = 0, 0, frame_w, frame_h
+        # The visible window of the frame, widened to whole pixels
+        x0 = max(0, int(math.floor(view.ox)))
+        y0 = max(0, int(math.floor(view.oy)))
+        x1 = min(frame_w, int(math.ceil(view.ox + frame_w / view.zoom)))
+        y1 = min(frame_h, int(math.ceil(view.oy + frame_h / view.zoom)))
         # The clip is cut from the proxy: its frame i is source frame trimstart + i (when trimmed),
         # and its pixels start at trimorigin in the proxy, plus any crop shown on top of it
         ox, oy = self.trimorigin
@@ -196,10 +222,11 @@ class Video:
         source_frame = self.frameidx + (self.trimstart if self.istrimmed else 0)
         if not self.istrimmed and self.rigid.active_duration:
             source_frame = self.rigid.active_duration[self.frameidx]
-        part = self.rigid.native_region(source_frame, (ox + x, oy + y, w, h))
-        if part is None:
+        found = self.rigid.native_region_at(source_frame, (ox + x0, oy + y0, x1 - x0, y1 - y0))
+        if found is None:
             return None
-        return self.filters.apply_filter(part)
+        image, nx0, ny0, sx, sy = found
+        return NativePart(self.filters.apply_filter(image), nx0, ny0, sx, sy, ox, oy)
 
     def _prepare_native(self) -> None:
         """Builds the full-resolution copy on a worker thread, then tells the app it is ready."""
@@ -226,10 +253,25 @@ class Video:
         enlarging = size[0] >= img.shape[1] and size[1] >= img.shape[0]
         return cv2.resize(img, size, interpolation=cv2.INTER_NEAREST if enlarging else cv2.INTER_AREA)
 
-    def show_array(self, frame, view=None, native=None) -> None:
+    @staticmethod
+    def _place(img, size: tuple[int, int], ax: float, ay: float, tx: float, ty: float):
+        """
+        Draws img enlarged without smoothing, mapping its pixel index (i, j) to canvas (ax*i + tx,
+        ay*j + ty). The map is exact, to a fraction of a pixel, so the picture and the overlays
+        (which use the same numbers) agree at any zoom and pan.
+        """
+        matrix = np.array([[ax, 0.0, tx], [0.0, ay, ty]], np.float64)
+        return cv2.warpAffine(img, matrix, size, flags=cv2.INTER_NEAREST,
+                              borderMode=cv2.BORDER_REPLICATE)
+
+    def show_array(self, frame, view=None, native: Optional[NativePart] = None) -> None:
         """Draws a processed (cropped) frame on the canvas, through the zoom and pan view.
 
-        native: the visible part of the frame at full resolution (see _native_picture), which is
+        The picture occupies the frame's size times the fit, showing the part of the frame inside
+        the view's window. Frame point u (a pixel k spans [k, k+1)) is drawn at
+        (u - window_origin) * zoom * fit, which is the transform the overlays use.
+
+        native: the visible part of the frame at full resolution (see _native_view), which is
         drawn instead of the proxy's pixels.
         """
         # An empty frame comes from a clip that failed to load. Drawing it raises inside the Tk
@@ -238,16 +280,23 @@ class Video:
             self.logger.warning("Skipping redraw: the frame is empty")
             return
 
-        # The picture is drawn at the frame's size times the fit (so a cropped frame fills the view)
         fit = view.fit if view is not None else 1.0
         out = (max(1, round(frame.shape[1] * fit)), max(1, round(frame.shape[0] * fit)))
         shown = frame
         if view is not None:
             view.configure(view.origin, (frame.shape[1], frame.shape[0]))
-        if native is not None and native.size > 0:
-            shown = self._scale(native, out)
-        elif view is not None:
-            if view.zoom > 1:
+            m = view.zoom * fit
+            if native is not None and native.image.size > 0:
+                # Pixel i of the part is at (x0 + i + 0.5) / sx in the proxy, which is that minus
+                # the frame's offset in the frame; the canvas position follows from the view
+                ax, ay = m / native.sx, m / native.sy
+                tx = ax * (native.x0 + 0.5) - m * (native.off_x + view.ox) - 0.5
+                ty = ay * (native.y0 + 0.5) - m * (native.off_y + view.oy) - 0.5
+                shown = self._place(native.image, out, ax, ay, tx, ty)
+            elif m >= 1 and (m != 1 or view.ox or view.oy):
+                shown = self._place(frame, out, m, m, m * (0.5 - view.ox) - 0.5,
+                                    m * (0.5 - view.oy) - 0.5)
+            elif view.zoom > 1:  # Shrunk and zoomed: average a whole-pixel window
                 x, y, w, h = view.window()
                 part = frame[y:y + h, x:x + w]
                 if part.size == 0:
@@ -257,6 +306,7 @@ class Video:
             elif fit != 1:
                 shown = self._scale(frame, out)
 
+        self.drawn = shown  # What is on the canvas (BGR), for tests that check overlays against it
         img = Image.fromarray(cv2.cvtColor(shown.copy(), cv2.COLOR_BGR2RGB))
         self.tkimg = ImageTk.PhotoImage(image=img)  # Making a new one is faster than paste()
 
@@ -318,7 +368,8 @@ class Video:
 
     def clear(self) -> None:
         """
-        Clear stored tracking points from memory.
+        Clear stored tracking points and OCR readings from memory (the video stays loaded).
         """
         self.rigid.trackpts.clear()
+        self.rigid.texts = OCRData([])
         self.logger.info("Tracking points cleared from memory.")

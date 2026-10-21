@@ -7,7 +7,6 @@ Enables real-world dimension mapping configurations for video frames.
 Author: Isam Balghari
 """
 
-import threading
 import customtkinter as ctk
 from math import floor, atan2, cos, sin, degrees, hypot, radians
 from tkinter import messagebox
@@ -17,13 +16,6 @@ from core.autoruler import snap_ruler
 from .dialogbox import DialogBox
 from .buttons import SubmitButton
 from .anglecontrol import AngleControl
-
-
-def _load_segmenter():
-    """Segment Anything for Auto Ruler, or None when the model is not installed (the ruler then
-    snaps by colour and edges)."""
-    from media.segmenter import default_segmenter
-    return default_segmenter()
 
 
 class ScaleRuler:
@@ -102,22 +94,51 @@ class ScaleRuler:
         return hypot(x - (x1 + t * dx), y - (y1 + t * dy))
 
     # ---------------------------------------------------------------------------------------------
+    def _picture_origin(self) -> tuple[float, float]:
+        """Canvas position of the picture's top-left corner (the frame's pixel (0, 0))."""
+        return self.view.origin if self.view is not None else (0, 0)
+
     def get_state(self) -> dict:
-        """Ruler endpoints in canvas pixels, plus the calibrated length."""
-        return {"p1": list(self.p1), "p2": list(self.p2),
-                "real_world_length": self.real_world_length, "unit": self.unit,
+        """Ruler endpoints relative to the picture's top-left corner (in frame pixels), so they stay
+        on the same part of the picture whatever the window size. Also the calibrated length."""
+        ox, oy = self._picture_origin()
+        return {"p1": [self.p1[0] - ox, self.p1[1] - oy], "p2": [self.p2[0] - ox, self.p2[1] - oy],
+                "anchor": "picture", "real_world_length": self.real_world_length, "unit": self.unit,
                 "canvas": [self.vwidth, self.vheight]}
 
     def unit_label(self) -> str:
         """The unit the measurements are in: the typed unit once calibrated, else pixels."""
         return self.unit if self.real_world_length is not None else "px"
 
+    def shift(self, dx: float, dy: float) -> None:
+        """Moves the ruler with the picture, when the picture is placed again after a resize."""
+        self.p1 = [self.p1[0] + dx, self.p1[1] + dy]
+        self.p2 = [self.p2[0] + dx, self.p2[1] + dy]
+        if self.placed:
+            self.draw()
+
+    def set_canvas_size(self, vwidth: int, vheight: int) -> None:
+        """The video area has a new size: the buttons stay in its bottom-right corner."""
+        self.vwidth, self.vheight = vwidth, vheight
+        for name, (x, y) in {"btn_window_id": (vwidth - 20, vheight - 20),
+                             "autobtn_window_id": (vwidth - 90, vheight - 20),
+                             "undobtn_window_id": (vwidth - 210, vheight - 20)}.items():
+            wid = getattr(self, name, None)
+            if wid is not None and self.canvas.type(wid):
+                self.canvas.coords(wid, x, y)
+
     def restore_state(self, state: dict) -> None:
-        """Re-places the ruler and its calibration, scaling if the window size has changed."""
-        sx = self.vwidth / state["canvas"][0]
-        sy = self.vheight / state["canvas"][1]
-        self.p1 = [state["p1"][0] * sx, state["p1"][1] * sy]
-        self.p2 = [state["p2"][0] * sx, state["p2"][1] * sy]
+        """Re-places the ruler and its calibration. Older projects stored canvas positions, which
+        are scaled if the window size has changed."""
+        if state.get("anchor") == "picture":
+            ox, oy = self._picture_origin()
+            self.p1 = [state["p1"][0] + ox, state["p1"][1] + oy]
+            self.p2 = [state["p2"][0] + ox, state["p2"][1] + oy]
+        else:
+            sx = self.vwidth / state["canvas"][0]
+            sy = self.vheight / state["canvas"][1]
+            self.p1 = [state["p1"][0] * sx, state["p1"][1] * sy]
+            self.p2 = [state["p2"][0] * sx, state["p2"][1] * sy]
         self.real_world_length = state["real_world_length"]
         self.unit = state.get("unit", "")
         self.placed = True
@@ -156,14 +177,14 @@ class ScaleRuler:
         # Snaps the ruler's ends to the object's ends, along its left edge
         self.autobtn = ctk.CTkButton(self.canvas, text="Auto Ruler", width=110, height=40,
                                      command=self.autosnap)
-        self.canvas.create_window(self.vwidth - 90, self.vheight - 20, window=self.autobtn,
-                                  anchor="se", tags=self.BUTTON_TAG)
+        self.autobtn_window_id = self.canvas.create_window(
+            self.vwidth - 90, self.vheight - 20, window=self.autobtn, anchor="se", tags=self.BUTTON_TAG)
 
         # Puts the ruler back where it was before the last Auto Ruler
         self.undobtn = ctk.CTkButton(self.canvas, text="Undo", width=90, height=40,
                                      command=self.undo_autosnap, state="disabled")
-        self.canvas.create_window(self.vwidth - 210, self.vheight - 20, window=self.undobtn,
-                                  anchor="se", tags=self.BUTTON_TAG)
+        self.undobtn_window_id = self.canvas.create_window(
+            self.vwidth - 210, self.vheight - 20, window=self.undobtn, anchor="se", tags=self.BUTTON_TAG)
 
     def undo_autosnap(self) -> None:
         """Puts the ruler's ends back to where they were before the last Auto Ruler."""
@@ -180,12 +201,9 @@ class ScaleRuler:
         """
         Moves the ruler's ends onto the edges of the object it lies on (see core/autoruler).
 
-        With Segment Anything installed, the object's outline comes from the model, which takes
-        some seconds, so the work runs on a worker thread and the button shows that it is busy.
-        The worker gets the frame as a plain array and never touches Tk.
+        The colour search takes a few hundredths of a second on a frame, so it runs here, on the
+        UI thread, with the frame as a plain array.
         """
-        if getattr(self, "_snapping", False):
-            return
         image = self.frame_source() if self.frame_source else None
         if image is None:
             messagebox.showerror("Auto Ruler", "There is no picture to measure yet.")
@@ -194,37 +212,12 @@ class ScaleRuler:
         start1 = (self.p1[0] - ox, self.p1[1] - oy)
         start2 = (self.p2[0] - ox, self.p2[1] - oy)
         half_width = self.height / 2
-        result = {}
-
-        def work():
-            try:
-                segmenter = _load_segmenter()
-                result["ends"] = snap_ruler(image, start1, start2, side="left",
-                                            half_width=half_width, segmenter=segmenter)
-            except Exception as e:  # Reported on the UI thread below
-                result["error"] = e
-
-        self._snapping = True
-        if self.autobtn:
-            self.autobtn.configure(state="disabled", text="Finding...")
-        worker = threading.Thread(target=work, daemon=True)
-        worker.start()
-
-        def finish():
-            if worker.is_alive():
-                self.canvas.after(100, finish)
-                return
-            self._snapping = False
-            if self.autobtn is None:
-                return  # The ruler was closed meanwhile
-            self.autobtn.configure(state="normal", text="Auto Ruler")
-            if "error" in result:
-                messagebox.showerror("Auto Ruler", str(result["error"]))
-                return
-            q1, q2 = result["ends"]
-            self._apply_snap(q1, q2, ox, oy)
-
-        self.canvas.after(100, finish)
+        try:
+            q1, q2 = snap_ruler(image, start1, start2, side="left", half_width=half_width)
+        except ValueError as e:
+            messagebox.showerror("Auto Ruler", str(e))
+            return
+        self._apply_snap(q1, q2, ox, oy)
 
     def _apply_snap(self, q1, q2, ox: float, oy: float) -> None:
         """Moves the ends to the snapped points (frame pixels), keeping the old ones for Undo."""

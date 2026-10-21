@@ -41,19 +41,39 @@ class Axes:
         self._dragging = None  # (dx, dy) from the pointer to the origin while dragging
         self._items = None  # Canvas ids of the two lines and two labels, reused while moving
 
+    def _picture_origin(self) -> tuple[float, float]:
+        """Canvas position of the picture's top-left corner (the frame's pixel (0, 0))."""
+        return self.view.origin if self.view is not None else (0, 0)
+
     def get_state(self) -> dict:
-        """Axes placement in canvas pixels, with the canvas size it was measured on."""
-        return {"ox": self.ox, "oy": self.oy, "theta": self.theta.get(),
-                "canvas": [self.vwidth, self.vheight]}
+        """Axes origin relative to the picture's top-left corner (in frame pixels), so the axes stay
+        on the same part of the picture whatever the window size."""
+        ox, oy = self._picture_origin()
+        return {"ox": self.ox - ox, "oy": self.oy - oy, "theta": self.theta.get(),
+                "anchor": "picture", "canvas": [self.vwidth, self.vheight]}
 
     def restore_state(self, state: dict) -> None:
-        """Re-places the axes, scaling positions if the window size has changed."""
-        sx = self.vwidth / state["canvas"][0]
-        sy = self.vheight / state["canvas"][1]
-        self.ox = state["ox"] * sx
-        self.oy = state["oy"] * sy
+        """Re-places the axes. Older projects stored canvas positions, which are scaled if the
+        window size has changed."""
+        if state.get("anchor") == "picture":
+            ox, oy = self._picture_origin()
+            self.ox = state["ox"] + ox
+            self.oy = state["oy"] + oy
+        else:
+            sx = self.vwidth / state["canvas"][0]
+            sy = self.vheight / state["canvas"][1]
+            self.ox = state["ox"] * sx
+            self.oy = state["oy"] * sy
         self.theta.set(state["theta"])
         self.placed = True
+        self.rotate()
+
+    def shift(self, dx: float, dy: float) -> None:
+        """Moves the axes with the picture, when the picture is placed again after a resize."""
+        if not self.placed:
+            return
+        self.ox += dx
+        self.oy += dy
         self.rotate()
 
     def clear(self):

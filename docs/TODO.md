@@ -1,6 +1,46 @@
 # TODO
 
 ## Last done (newest first)
+- **Zoom and pan broke overlay positions and scales (fixed).** The zoomed picture was drawn from
+  a whole-pixel crop stretched to a fixed size, while ruler, axes, boxes and tracked points use the
+  exact transform. Rounding the crop could drop a pixel and change the scale by about 2%, so
+  overlays drifted by up to a dozen pixels at high zoom. Enlarged pictures are now drawn through an
+  exact sub-pixel map (`Video._place`), for both the proxy and the full-resolution copy.
+  `tests/test_overlay_geometry.py` checks it to 1 px across zoom, pan, window size and frame
+  offset (and was confirmed to fail when the drawing is shifted); `test_overlay_alignment.py`
+  checks a real rotated clip.
+- **Tracker benchmark** (`tests/test_tracker_scenarios.py`): ten scenarios from a white screen to
+  camouflage with look-alikes and occluders, with the tracker given the circle's bounding square.
+  `tests/benchmark_report.py` builds a page with a player and error chart per scenario.
+- **Too zoomed on start (fixed).** The window resize redrew the picture while the proxy was still
+  encoding, when the reader still pointed at the source file. That cached a source-size frame,
+  which stayed after the reader switched to the proxy, so the picture was drawn at the wrong size.
+  A resize is now laid out only after loading ends, and the frame cache is cleared when a load
+  completes. `tests/test_start_view.py` loads a rotated phone-style clip, waits for the first frame,
+  and checks the drawn picture against the video area.
+- **Tests keep out of Open Recent:** the harness points the recent list at the run folder, and a
+  check guards it. The test entries that had reached `~/.phystrackx/recent.json` were removed.
+- **Auto Ruler is fast now (about 0.03 s, was 8 s with Segment Anything).** It finds the bar by
+  colour (Lab a and b) against the wall beside it, and no longer loads Segment Anything. On the
+  Air Trial 1 frame the ends land within about 2 px of the Segment Anything result. Segment
+  Anything stays in the tracker's assist and the batch plan.
+- **File menu** in the menu bar: Open Video, Open Project (Cmd+O), Open Recent (the last 8
+  projects, kept in `~/.phystrackx/recent.json`), Save Project (Cmd+S). Opening another file asks
+  whether to save the current project first.
+- **Clear Data** in the track strip: during a run it stops the run and discards the results when
+  it ends; otherwise it discards them at once. The boxes and the video stay, so tracking starts
+  again from the beginning.
+- **Window resize:** the video area follows the window. The picture is fitted to it, and the
+  ruler and axes keep their place on the picture (they are stored relative to the picture now).
+  Track rectangles were already relative to the picture.
+- **Dark text** on the cyan strips (zoom, X, Y, rotation, crop and track status, the two check
+  boxes).
+- **`--video` with a project file** opens that project.
+- **Startup crash fixed:** a failed video load raised NameError (the error variable was read
+  after its except block). The error is now kept in its own variable.
+- **Tests run in parallel** (four at a time, each with its own run folder), about a minute of wall
+  time for the whole suite. `core.abspath` resolves resources from the project folder, so the
+  working directory no longer matters.
 - **Plots:**
   - Fit results and the legend sit in a panel beside the plot, so nothing covers the data.
   - Plots without a fit have a legend that is placed automatically and can be dragged.
@@ -38,6 +78,18 @@
 - Starting any tool cancels the one before it.
 
 ## Open
+- **Tracker weaknesses found by the benchmark:** a small, fast ball (the dropped ball, up to about
+  18 px per frame) is lost after the first bounce (first miss at frame 39), and a fast ball on
+  camouflage is lost when large shapes pass in front of it (frame 109). Both are marked
+  `known_weak` in `tests/test_tracker_scenarios.py` with a floor. Try the Segment Anything assist
+  on them, and a search for the ball near its last position when the tracker's score drops.
+- **Half-pixel convention:** tracked points are plotted at pixel indices, but the picture treats a
+  pixel as spanning its whole cell, so points sit half a frame pixel up and left of the cell's
+  centre (about 3 canvas px at 6x zoom). Decide on one convention.
+- **Window resize, not yet covered:** the seek bar keeps its starting width, so it does not
+  stretch with the window, and geometry shapes (triangle, line) are not moved with the picture.
+- **Auto Ruler on other footage:** tuned on one frame of Air Trial 1 (colour distance 8, from the
+  wall's a and b). Check it on the other trials, and on a ruler that is paler than this one.
 - **Batch trials** (large): see [BATCH_TRIALS_PLAN.md](BATCH_TRIALS_PLAN.md). It covers a batch
   runner that reuses setup between trials, automatic trim, an experiment reference (labelled ruler,
   axes, and ball patches found again by template matching plus Segment Anything), a review grid, and

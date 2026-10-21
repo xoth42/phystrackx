@@ -46,8 +46,11 @@ def test_zoomed_view_reads_the_full_resolution_copy():
         proxy_w = app.videoapp.rigid.proxysize[0]
         native_w = app.videoapp.rigid._nativereader.width
         x, y, w, h_ = app.view.window()
+        # The part is the window widened to whole frame pixels (the view can be placed at a
+        # fraction of a pixel), so it is the window's width plus up to two frame pixels
+        ratio = native_w / proxy_w
         h.check("the native part covers the same picture area",
-                abs(part.shape[1] - w * native_w / proxy_w) <= 1,
+                (w - 1) * ratio - 2 <= part.shape[1] <= (w + 2) * ratio + 2,
                 f"{part.shape} for window {w}x{h_}")
     # A trimmed clip (cut from the proxy) zooms from the full-resolution copy too
     app.view.reset()
@@ -65,8 +68,9 @@ def test_zoomed_view_reads_the_full_resolution_copy():
         x, y, w, h_ = app.view.window()
         native_w = app.videoapp.rigid._nativereader.width
         proxy_w = app.videoapp.rigid.proxysize[0]
+        ratio = native_w / proxy_w
         h.check("the trimmed part's size matches the native pixels",
-                abs(trimmed.shape[1] - w * native_w / proxy_w) <= 2, f"{trimmed.shape}")
+                (w - 1) * ratio - 2 <= trimmed.shape[1] <= (w + 2) * ratio + 2, f"{trimmed.shape}")
     root.destroy()
 
 

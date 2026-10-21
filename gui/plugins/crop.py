@@ -54,6 +54,13 @@ class Crop:
         self.fx = floor(self.vwidth / 2 - self.fwidth / 2)
         self.fy = floor(self.vheight / 2 - self.fheight / 2)
 
+    def relayout(self, vwidth: int, vheight: int) -> None:
+        """The video area has a new size: the picture is placed again and fitted to it. A crop not
+        being drawn is always fitted; the full frame is fitted too, so it fills a larger window."""
+        self.vwidth, self.vheight = vwidth, vheight
+        self.fitted = not self._drawing
+        self._place()
+
     def set(self, fwidth:int = 0, fheight:int = 0):
         if self.croprect is not None:
             self.logger.info("Crop rectangle exists. Ignoring new dimensions and using existing.")

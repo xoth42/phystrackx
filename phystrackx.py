@@ -13,6 +13,7 @@ import signal
 import customtkinter as ctk
 from gui.menu import MenuScreen
 from core import crash, session, setup_logging
+from core.project import PROJECT_EXTENSION
 
 
 class GUI:
@@ -71,6 +72,10 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--download-models", action="store_true",
                         help="Download the tracking models if missing, then exit.")
     args = parser.parse_args()
+
+    # A project file given as --video opens that project (its video is named inside it)
+    if args.video and args.video.lower().endswith(PROJECT_EXTENSION):
+        args.project, args.video = args.video, None
 
     if args.video and args.project:
         parser.error("--video and --project cannot be used together; the project names its video")

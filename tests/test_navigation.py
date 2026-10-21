@@ -159,6 +159,7 @@ def test_cmd_zero_returns_to_the_whole_picture():
 def test_axes_drag_by_the_origin_and_keep_their_angle():
     root, app = _open_app()
     app.markaxes()
+    h.pump(root, timeout=0.5)  # The zoom strip appears below the video, which re-lays it out
     c = app.videoview
     ox0, oy0 = app.view.origin
     sx, sy = app.view.to_canvas(ox0 + 50, oy0 + 300)
@@ -166,6 +167,8 @@ def test_axes_drag_by_the_origin_and_keep_their_angle():
     app.axes.theta.set(12.0)
     app.axes.rotate()
     root.update()
+    h.pump(root, timeout=0.5)  # Showing the axis controls re-lays out the video area
+    sx, sy = app.axes._screen_origin()
     before = (app.axes.ox, app.axes.oy)
     c.event_generate("<Button-1>", x=int(sx), y=int(sy))
     c.event_generate("<B1-Motion>", x=int(sx) + 30, y=int(sy) - 20)

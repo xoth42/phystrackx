@@ -10,6 +10,7 @@ Author: Isam Balghari
 import logging
 import os
 import queue
+import sys
 import threading
 import tkinter as tk
 from tkinter import BooleanVar, filedialog, messagebox
@@ -19,7 +20,7 @@ import customtkinter as ctk
 from PIL import Image, ImageTk
 
 from core import PixelRect, NormalizedRect
-from core import crash, session
+from core import crash, recent, session
 from gui.components.plot.csvdata import load_csv
 from core.project import PROJECT_EXTENSION, new_project, read_project, write_project
 from gui.app import App
@@ -119,10 +120,15 @@ class RigidApp(App):
         self.viewcontrols = ViewControls(self.vidframe, self.view, on_change=self._on_view_change,
                                          on_shape=self._on_shape)
         self._bind_view_gestures()
+        self._relayout_job = None
+        self._loading = False  # True from loadvideo until the video is ready to be drawn
+        self.videoview.bind("<Configure>", self._on_video_area_resized)
 
         # Crop step of the trim tool: crops the trimmed clip, not just the display
         self.cropstrip = ctk.CTkFrame(self.vidframe, fg_color="transparent")
-        self.cropstatus = ctk.CTkLabel(self.cropstrip, text="", font=("Arial", 14, "bold"))
+        # Dark text on the cyan strips below the video (the default white is hard to read there)
+        self.cropstatus = ctk.CTkLabel(self.cropstrip, text="", font=("Arial", 14, "bold"),
+                                       text_color="black")
         self.cropstatus.pack(side="left", padx=10)
         ctk.CTkButton(self.cropstrip, text="Crop Region", width=110,
                       command=self._start_trim_crop).pack(side="left", padx=5)
@@ -130,13 +136,13 @@ class RigidApp(App):
                       command=self._clear_trim_crop).pack(side="left", padx=5)
         # Tracking reads the full-size source, so measurements are not limited by the window's size
         self.fullres_var = BooleanVar(value=True)
-        ctk.CTkCheckBox(self.cropstrip, text="Full resolution", variable=self.fullres_var).pack(
-            side="left", padx=15)
+        ctk.CTkCheckBox(self.cropstrip, text="Full resolution", variable=self.fullres_var,
+                        text_color="black").pack(side="left", padx=15)
         # Segment Anything re-finds the object on hard frames (a hand moving beside the ball):
         # more reliable starts, but seconds per hard frame on a CPU, so it is off by default
         self.assist_var = BooleanVar(value=False)
         ctk.CTkCheckBox(self.cropstrip, text="Assist (Segment Anything, slow)",
-                        variable=self.assist_var).pack(side="left", padx=15)
+                        variable=self.assist_var, text_color="black").pack(side="left", padx=15)
         self.plugin_mgr.crop.on_apply = self._update_crop_status
 
         # Tracking screen: stop, manual correction of positions, and the zoom bars
@@ -146,7 +152,8 @@ class RigidApp(App):
         self.manual_mode = False
         self._track_thread = None
         self.trackstrip = ctk.CTkFrame(self.vidframe, fg_color="transparent")
-        self.trackstatus = ctk.CTkLabel(self.trackstrip, text="", font=("Arial", 14, "bold"))
+        self.trackstatus = ctk.CTkLabel(self.trackstrip, text="", font=("Arial", 14, "bold"),
+                                        text_color="black")
         self.trackstatus.pack(side="left", padx=10)
         self.stopbtn = ctk.CTkButton(self.trackstrip, text="Stop", width=90, fg_color="#e03131",
                                      hover_color="#c92a2a", command=self._request_stop)
@@ -154,6 +161,11 @@ class RigidApp(App):
         self.manualbtn = ctk.CTkButton(self.trackstrip, text="Manual Position: Off", width=190,
                                        command=self._toggle_manual)
         self.manualbtn.pack(side="left", padx=5)
+        # Throws away the tracked positions, so tracking can start again from the beginning
+        self._clear_after_stop = False  # Set when Clear Data is pressed during a run
+        self.cleardatabtn = ctk.CTkButton(self.trackstrip, text="Clear Data", width=110,
+                                          command=self._clear_track_data)
+        self.cleardatabtn.pack(side="left", padx=5)
         ctk.CTkButton(self.trackstrip, text="Close", width=90,
                       command=self._close_track_view).pack(side="left", padx=5)
 
@@ -166,6 +178,7 @@ class RigidApp(App):
         
         self.logger.info("RigidApp UI system fully mapped and operational.")
 
+        self._build_menu()
         self._ui_queue = queue.Queue()
         self._pump_ui_queue()
 
@@ -185,6 +198,105 @@ class RigidApp(App):
         if self.videopath:
             parts.append(os.path.basename(self.videopath))
         self.root.title(" - ".join(parts))
+
+    def _build_menu(self) -> None:
+        """The File menu in the menu bar at the top of the screen (the system bar on macOS)."""
+        mac = sys.platform == "darwin"
+        shown = "Cmd" if mac else "Ctrl"       # The shortcut as the menu shows it
+        key = "Command" if mac else "Control"  # The name Tk binds to
+        menubar = tk.Menu(self.root)
+        filemenu = tk.Menu(menubar, tearoff=0)
+        filemenu.add_command(label="Open Video...", command=self._open_video_dialog)
+        filemenu.add_command(label="Open Project...", command=self._open_project_dialog,
+                             accelerator=f"{shown}+O")
+        self.recentmenu = tk.Menu(filemenu, tearoff=0, postcommand=self._fill_recent_menu)
+        filemenu.add_cascade(label="Open Recent", menu=self.recentmenu)
+        filemenu.add_separator()
+        filemenu.add_command(label="Save Project", command=self.savedata, accelerator=f"{shown}+S")
+        menubar.add_cascade(label="File", menu=filemenu)
+        self.root.config(menu=menubar)
+        self.root.bind(f"<{key}-o>", lambda e: self._open_project_dialog())
+        self.root.bind(f"<{key}-s>", lambda e: self.savedata())
+
+    def _fill_recent_menu(self) -> None:
+        """Lists the recent projects, newest first. Each shows its name and its folder."""
+        self.recentmenu.delete(0, "end")
+        paths = recent.load()
+        if not paths:
+            self.recentmenu.add_command(label="No recent projects", state="disabled")
+            return
+        for path in paths:
+            name = os.path.splitext(os.path.basename(path))[0]
+            folder = os.path.basename(os.path.dirname(path))
+            self.recentmenu.add_command(label=f"{name}   ({folder})",
+                                        command=lambda p=path: self._open_recent(p))
+        self.recentmenu.add_separator()
+        self.recentmenu.add_command(label="Clear Menu", command=recent.forget_all)
+
+    def _open_video_dialog(self) -> None:
+        path = filedialog.askopenfilename(
+            filetypes=[("Video files", "*.mp4 *.avi *.mov *.MP4 *.MOV")])
+        if path:
+            self._start_session(videopath=path)
+
+    def _open_project_dialog(self) -> None:
+        path = filedialog.askopenfilename(
+            filetypes=[("PhysTrackX project", f"*{PROJECT_EXTENSION}")])
+        if path:
+            self._start_session(projectpath=path)
+
+    def _open_recent(self, path: str) -> None:
+        if not os.path.isfile(path):
+            messagebox.showerror("Open Recent", f"The project file is no longer there:\n{path}")
+            return
+        self._start_session(projectpath=path)
+
+    def _start_session(self, videopath: str | None = None, projectpath: str | None = None) -> None:
+        """Closes what is open and opens a video or a project in its place (File menu)."""
+        if self._live_on:
+            messagebox.showinfo("Tracking", "Stop or finish tracking before opening another file.")
+            return
+        if self.projectpath:
+            answer = messagebox.askyesnocancel(
+                "Open", "Save the current project before opening another one?")
+            if answer is None:
+                return
+            if answer:
+                try:
+                    write_project(self.projectpath, self.project_state())
+                except OSError as e:
+                    messagebox.showerror("Save project", f"Could not save the project:\n{e}")
+                    return
+
+        self._cancel_active_tools()
+        self._reset_workspace()
+        if projectpath:
+            self._open_project(projectpath)
+        else:
+            self.videopath = videopath
+            self._create_project(videopath)
+            self.loadvideo(videopath)
+        self._update_title()
+
+    def _reset_workspace(self) -> None:
+        """Clears everything placed on the current video, ready for another file."""
+        self.clearcomponents()
+        self.trim_range = None
+        self.scruler.placed = False
+        self.videoapp.clear()
+        self.ocrrects.clear()
+        self.track_rects.clear()
+        self.seekbar.clear()
+        self.plugin_mgr.crop.clear()
+        self.plugin_mgr.geometry.reset()
+        self.saved_data = None
+        self.loaded_data = None
+        self.projectpath = None
+        self.videopath = None
+        session.set_project(None)
+        self.view.reset()
+        self._leave_trim_mode()
+        self._close_track_view()
 
     # Two-finger trackpad scrolls pan, and Cmd +/- zoom around the pointer. Pointer position and
     # scrolling use their own bind tag, so the canvas's bindings for axes and rectangles are kept.
@@ -290,6 +402,7 @@ class RigidApp(App):
             messagebox.showerror("Project", f"Could not create a project file:\n{e}")
             return
         session.set_project(self.projectpath)
+        recent.remember(self.projectpath)
         self.logger.info(f"New project: {self.projectpath}")
 
     def _ensure_video_loaded(self) -> bool:
@@ -330,6 +443,7 @@ class RigidApp(App):
         if self._live_on:
             messagebox.showinfo("Tracking", "Stop or finish tracking before loading another video.")
             return
+        self._loading = True
         self.view.reset()
         self.viewcontrols.hide()
         self._leave_trim_mode()
@@ -357,7 +471,9 @@ class RigidApp(App):
         except Exception as e:
             self.logger.exception(f"Failed to load video: {videopath}")
             progress.set(100)
-            self._post_to_ui(lambda: self._finish_failed_load(e))
+            # Python clears `e` when the except block ends, so the callback needs its own reference
+            error = e
+            self._post_to_ui(lambda: self._finish_failed_load(error))
             return
 
         progress.set(100)
@@ -382,6 +498,7 @@ class RigidApp(App):
         self.videoapp.canvas.coords(self.videoapp.imgview, 0, 0)
 
     def _finish_load(self, on_done=None) -> None:
+        self._loading = False
         self.spinner.destroy()
         self.progressbar.destroy()
         self.loadcomponents()
@@ -390,6 +507,7 @@ class RigidApp(App):
             on_done()
 
     def _finish_failed_load(self, error: Exception) -> None:
+        self._loading = False
         self.spinner.destroy()
         self.progressbar.destroy()
         messagebox.showerror("Error", f"Could not load the video:\n{error}")
@@ -517,6 +635,45 @@ class RigidApp(App):
             self._draw_live(*self._live_frame)  # Keep showing the tracked frame while it runs
         else:
             self.updateframe()
+
+    def _on_video_area_resized(self, _event=None) -> None:
+        """The window changed size. The layout follows once the drag settles, so a drag lays out
+        once rather than on every step."""
+        if self._relayout_job is not None:
+            self.root.after_cancel(self._relayout_job)
+        self._relayout_job = self.root.after(120, self._relayout)
+
+    def _relayout(self) -> None:
+        """Gives the video area its new size. The picture is fitted to it again, and the ruler and
+        axes are moved with it, so they stay on the same part of the picture."""
+        self._relayout_job = None
+        vw, vh = self.videoview.winfo_width(), self.videoview.winfo_height()
+        if vw < 100 or vh < 100 or (vw, vh) == (self.vwidth, self.vheight):
+            return
+        if self._live_on or self._loading:
+            # The tracker is drawing the picture, or the reader still points at the source file
+            # (the proxy is being encoded): lay out again later
+            self._relayout_job = self.root.after(500, self._relayout)
+            return
+
+        crop = self.plugin_mgr.crop
+        old_origin = (crop.cropx, crop.cropy)
+        self.vwidth, self.vheight = vw, vh
+        for part in (self.videoapp, self.track_rects, self.ocrrects, self.tpoints, self.axes,
+                     self.plugin_mgr.filters, self.plugin_mgr.geometry):
+            part.vwidth, part.vheight = vw, vh
+        self.scruler.set_canvas_size(vw, vh)
+        crop.relayout(vw, vh)
+
+        if self.videoapp.fcount >= 10:
+            dx, dy = crop.cropx - old_origin[0], crop.cropy - old_origin[1]
+            self.scruler.shift(dx, dy)
+            self.axes.shift(dx, dy)
+            self.updateframe()
+            self.track_rects.refresh()
+            self.ocrrects.refresh()
+            self.viewcontrols.sync()
+        self.logger.info(f"Video area resized to {vw}x{vh}")
         self.track_rects.refresh()
         self.ocrrects.refresh()
         if self.axes.placed:
@@ -775,6 +932,11 @@ class RigidApp(App):
     def _finish_track(self) -> None:
         self._stop_live()
         self.progressbar.destroy()
+        if self._clear_after_stop:  # Clear Data was pressed during the run: discard what it found
+            self._clear_after_stop = False
+            self._discard_track_data()
+            self.logger.info("Tracking stopped and its data cleared.")
+            return
         self.loadcomponents()
         self.logger.info("Background point tracking calculations wrapped cleanly.")
         self._finish_track_view(self._stop_requested)
@@ -782,8 +944,33 @@ class RigidApp(App):
     def _finish_failed_track(self, error: Exception) -> None:
         self._stop_live()
         self.progressbar.destroy()
+        self._clear_after_stop = False
         self._close_track_view()
         messagebox.showerror("Tracking failed", str(error))
+
+    def _clear_track_data(self) -> None:
+        """Clear Data: during a run, the run is stopped and its results are discarded when it ends;
+        otherwise the results are discarded now. The boxes and the video stay as they are."""
+        if self._track_thread is not None and self._track_thread.is_alive():
+            self._clear_after_stop = True
+            self._request_stop()
+            self.trackstatus.configure(text="Stopping, then clearing...")
+            return
+        self._discard_track_data()
+
+    def _discard_track_data(self) -> None:
+        """UI thread: forgets the tracked positions and OCR readings, and the points drawn for them."""
+        self.videoapp.clear()
+        self.tpoints.clear()
+        self.pipeline_mgr.datamanager.clear()
+        self._set_manual(False)
+        self._live_frame = None
+        self.videoview.delete("live")
+        self.manualbtn.configure(state="disabled")
+        self.stopbtn.configure(state="disabled")
+        self.trackstatus.configure(text="Data cleared: track again to start over")
+        self.updateframe()
+        self.logger.info("Tracking data cleared.")
 
     def clearcomponents(self) -> None:
         self.plugin_mgr.filters.clear()
@@ -833,6 +1020,7 @@ class RigidApp(App):
                 return
             self.projectpath = path
             session.set_project(path)
+            recent.remember(path)
             self._update_title()
 
         try:
@@ -909,6 +1097,7 @@ class RigidApp(App):
 
         self.projectpath = path
         session.set_project(path)
+        recent.remember(path)
         self._load_saved_data(state.get("data"))
         self.videopath = state["video"]
         if not os.path.isfile(self.videopath):

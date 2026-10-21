@@ -32,15 +32,19 @@ class ViewControls:
 
         self.frame = ctk.CTkFrame(parent, fg_color="transparent")
 
-        ctk.CTkLabel(self.frame, text="Zoom", font=("Arial", 14, "bold")).pack(side="left", padx=5)
+        # Dark text: the strip sits on the cyan background
+        ctk.CTkLabel(self.frame, text="Zoom", font=("Arial", 14, "bold"), text_color="black").pack(
+            side="left", padx=5)
         ttk.Scale(self.frame, from_=1, to=ViewTransform.MAX_ZOOM, orient="horizontal",
                   variable=self.zoomvar, command=self._on_zoom, length=180).pack(side="left", padx=5)
 
-        ctk.CTkLabel(self.frame, text="X", font=("Arial", 14, "bold")).pack(side="left", padx=(12, 2))
+        ctk.CTkLabel(self.frame, text="X", font=("Arial", 14, "bold"), text_color="black").pack(
+            side="left", padx=(12, 2))
         ttk.Scale(self.frame, from_=0, to=1, orient="horizontal", variable=self.xvar,
                   command=self._on_pan, length=180).pack(side="left", padx=5)
 
-        ctk.CTkLabel(self.frame, text="Y", font=("Arial", 14, "bold")).pack(side="left", padx=(12, 2))
+        ctk.CTkLabel(self.frame, text="Y", font=("Arial", 14, "bold"), text_color="black").pack(
+            side="left", padx=(12, 2))
         ttk.Scale(self.frame, from_=0, to=1, orient="horizontal", variable=self.yvar,
                   command=self._on_pan, length=180).pack(side="left", padx=5)
 

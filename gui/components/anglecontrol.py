@@ -28,7 +28,7 @@ class AngleControl:
         self.on_change = on_change
         self.frame = ctk.CTkFrame(parent, fg_color="transparent")
 
-        ctk.CTkLabel(self.frame, text="Rotation (°)", font=("Arial", 14, "bold")).pack(
+        ctk.CTkLabel(self.frame, text="Rotation (°)", font=("Arial", 14, "bold"), text_color="black").pack(
             side="left", padx=10)
 
         # Left of the middle rotates counterclockwise, right rotates clockwise

@@ -24,7 +24,8 @@ def abspath(rpath: str) -> str:
     """
     if hasattr(sys, "_MEIPASS"):  # PyInstaller temp directory
         return os.path.join(sys._MEIPASS, rpath)
-    return os.path.join(os.path.abspath("."), rpath)
+    # Resources live in the project folder, whatever the working directory is (tests run elsewhere)
+    return os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), rpath)
 
 
 def find_ffmpeg() -> str:

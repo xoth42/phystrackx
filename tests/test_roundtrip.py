@@ -66,8 +66,12 @@ def phase_open(proj: str) -> None:
     h.pump(root, timeout=0.5)
     loaded = app.project_state()
 
+    # The window size stamped on overlays differs between runs (the window is laid out again from
+    # its real size); overlays are stored relative to the picture, so the stamp is not compared
     def close(a, b):
         if isinstance(a, dict):
+            a = {k: v for k, v in a.items() if k != "canvas"}
+            b = {k: v for k, v in b.items() if k != "canvas"}
             return a.keys() == b.keys() and all(close(a[k], b[k]) for k in a)
         if isinstance(a, list):
             return len(a) == len(b) and all(close(x, y) for x, y in zip(a, b))
@@ -76,6 +80,8 @@ def phase_open(proj: str) -> None:
         return a == b
 
     for key in saved:
+        if key == "canvas":
+            continue
         h.check(f"reopened project keeps '{key}'", close(saved[key], loaded[key]),
                 f"\n     saved : {saved[key]}\n     loaded: {loaded[key]}")
     root.destroy()
@@ -86,8 +92,8 @@ def test_roundtrip():
     if os.path.exists(PROJ):
         os.remove(PROJ)
     for args in (["save", video, PROJ], ["open", PROJ]):
-        r = subprocess.run([sys.executable, "-m", "tests.test_roundtrip", *args], cwd=h.REPO,
-                           capture_output=True, text=True, env=os.environ)
+        r = subprocess.run([sys.executable, "-m", "tests.test_roundtrip", *args], cwd=h.RUN_CWD,
+                           capture_output=True, text=True, env=h.child_env())
         for line in r.stdout.splitlines():
             if line.strip().startswith(("PASS", "FAIL")) or line.startswith("     "):
                 print(line)
