@@ -38,7 +38,15 @@ SAM_MODELS = {
         "ec2df62732614e57411cdcf32a23ffdf28910380d03139ee0f4fcbe91eb8c912",
     ),
 }
-ALL_MODELS = {**NANOTRACK_MODELS, **SAM_MODELS}
+# ViTTrack (OpenCV's TrackerVit), from the OpenCV model zoo: a stronger single-object tracker
+VITTRACK_MODELS = {
+    "models/object_tracking_vittrack_2023sep.onnx": (
+        "https://huggingface.co/opencv/object_tracking_vittrack/resolve/main/"
+        "object_tracking_vittrack_2023sep.onnx",
+        "2990f0b7cd44d92afa48cd97db6de7be113fc1d9594fddb74e2725c10478e91d",
+    ),
+}
+ALL_MODELS = {**NANOTRACK_MODELS, **VITTRACK_MODELS, **SAM_MODELS}
 
 logger = logging.getLogger(__name__)
 

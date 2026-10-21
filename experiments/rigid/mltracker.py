@@ -9,7 +9,6 @@ Author: Isam Balghari
 
 import cv2
 import logging
-import os
 from core import abspath, PixelRect
 from .modelfiles import ensure_models
 
@@ -21,15 +20,6 @@ class MLTracker:
         self.tracker = None
         self.tracking_type = tracking_type
         
-    @staticmethod
-    def _require_models(paths: list[str]) -> None:
-        """Fails with a readable message instead of OpenCV's ONNX parse error."""
-        missing = [os.path.relpath(p) for p in paths if not os.path.isfile(p)]
-        if missing:
-            raise FileNotFoundError(
-                "Tracking model files are missing: " + ", ".join(missing) +
-                ". Place them in the models folder next to phystrackx.py.")
-
     def initialize_tracker(self, initial_frame: cv2.Mat, rect: PixelRect) -> None:
         """
         Initializes the tracker using the user's manual bounding box.
@@ -51,8 +41,8 @@ class MLTracker:
             self.tracker = cv2.TrackerNano_create(params)
             
         elif self.tracking_type == "vittrack":
-            param_path = abspath("models/vit_tracker_baseline.onnx")
-            self._require_models([param_path])
+            ensure_models(["models/object_tracking_vittrack_2023sep.onnx"])
+            param_path = abspath("models/object_tracking_vittrack_2023sep.onnx")
             params = cv2.TrackerVit_Params()
             params.net = param_path
             

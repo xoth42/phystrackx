@@ -17,6 +17,8 @@ seconds. The pipeline around the tracker (proxy, frame bookkeeping, full resolut
 test_tracker_accuracy. No window is needed.
 """
 
+import os
+import time
 from dataclasses import dataclass, field
 from typing import Callable
 
@@ -27,6 +29,7 @@ from tests import harness as h
 h.setup_env()
 
 from core import PixelRect  # noqa: E402
+from experiments.rigid.blobtracker import BlobTracker  # noqa: E402
 from experiments.rigid.mltracker import MLTracker  # noqa: E402
 
 W, H, N = 640, 480, 120
@@ -324,29 +327,48 @@ class Trace:
     centre: np.ndarray   # (N, 2) tracker's centre (the last known one when it reports being lost)
     error: np.ndarray    # (N,) distance between the two centres, in pixels
     lost: np.ndarray     # (N,) True where the tracker reported that it lost the object
+    ms_per_frame: float = 0.0  # The tracker's own time per frame
 
 
-def trace(scn: Scenario) -> Trace:
-    """Selects the ball on frame 0 with its circle's bounding square, then tracks it."""
-    tracker = MLTracker("nanotrack")
+ENGINES = ("nanotrack", "vittrack", "trackpy")
+ENGINE = os.environ.get("PHYSTRACK_TRACKER", "nanotrack")  # The engine the tests score
+
+
+def make_tracker(engine: str):
+    if engine == "trackpy":
+        return BlobTracker()
+    return MLTracker(engine)
+
+
+def trace(scn: Scenario, engine: str = None) -> Trace:
+    """Selects the ball on frame 0 with its circle's bounding square, then tracks it. Times only
+    the tracker's own work (drawing the frames is not counted)."""
+    tracker = make_tracker(engine or ENGINE)
     x0, y0 = scn.truth(0)
     r = int(round(scn.radius))
     selection = PixelRect(int(round(x0)) - r, int(round(y0)) - r, 2 * r, 2 * r)
     tracker.initialize_tracker(scn.frame(0), selection)
     truth = np.array([scn.truth(t) for t in range(N)], float)
     box = np.zeros((N, 4))
+    centre = np.zeros((N, 2))
     lost = np.zeros(N, bool)
     box[0] = (selection.xmin, selection.ymin, selection.width, selection.height)
+    centre[0] = (x0, y0)
+    spent = 0.0
     for t in range(1, N):
-        ok, found = tracker.update_tracker(scn.frame(t))
+        frame = scn.frame(t)
+        start = time.perf_counter()
+        ok, found = tracker.update_tracker(frame)
+        spent += time.perf_counter() - start
         if ok:
             box[t] = (found.xmin, found.ymin, found.width, found.height)
+            # A sub-pixel centre when the tracker has one; otherwise the box's centre
+            centre[t] = getattr(tracker, "centre", None) or (box[t, :2] + box[t, 2:] / 2)
         else:
-            box[t] = box[t - 1]
+            box[t], centre[t] = box[t - 1], centre[t - 1]
             lost[t] = True
-    centre = box[:, :2] + box[:, 2:] / 2
     error = np.hypot(*(centre - truth).T)
-    return Trace(truth, box, centre, error, lost)
+    return Trace(truth, box, centre, error, lost, 1000.0 * spent / (N - 1))
 
 
 def score(scn: Scenario, tr: Trace) -> Result:
