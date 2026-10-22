@@ -92,7 +92,7 @@ def test_roundtrip():
     if os.path.exists(PROJ):
         os.remove(PROJ)
     for args in (["save", video, PROJ], ["open", PROJ]):
-        r = subprocess.run([sys.executable, "-m", "tests.test_roundtrip", *args], cwd=h.RUN_CWD,
+        r = subprocess.run([sys.executable, "-m", "tk.tests.test_roundtrip", *args], cwd=h.RUN_CWD,
                            capture_output=True, text=True, env=h.child_env())
         for line in r.stdout.splitlines():
             if line.strip().startswith(("PASS", "FAIL")) or line.startswith("     "):
