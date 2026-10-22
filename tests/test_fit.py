@@ -245,6 +245,33 @@ def test_quadratic_drag_with_drift_recovers_the_slope():
             abs(fit.params["omega"] - 1.2) / 1.2 < 0.03, f"{fit.params['omega']:.4f}")
 
 
+def test_drag_fit_on_damped_data_is_quick_and_stoppable():
+    """Data that is not drag-shaped (a damped swing about a falling line, like Air Trial 4's
+    distance): the drag fits took 87 s and 12 s here, which froze the plot. They now start from the
+    damped fit, so each takes about a second; and `stop` abandons a fit part-way."""
+    import time
+    from gui.components.plot.fit import FitStopped, damped_linear, fit_model
+    t = np.arange(10.59, 30.69, 1 / 30)
+    y = damped_linear(t - t[0], 55.0, 0.5, 1.34, 0.0, 20.0, -0.5)
+    y = y + np.random.default_rng(0).normal(0, 0.3, t.size)
+    damped_r2 = fit_model(t, y, "damped").r2
+    for model in ("drag", "drag_linear"):
+        start = time.time()
+        fit = fit_model(t, y, model)
+        took = time.time() - start
+        h.check(f"{model} fits damped-shaped data in a few seconds", fit.ok and took < 5.0,
+                f"{took:.2f} s")
+        h.check(f"{model} does at least nearly as well as the plain damped fit",
+                fit.r2 > damped_r2 - 0.05, f"R² {fit.r2:.4f} vs {damped_r2:.4f}")
+    calls = []
+    try:
+        fit_model(t, y, "drag", stop=lambda: calls.append(1) or len(calls) > 20)
+        stopped = False
+    except FitStopped:
+        stopped = True
+    h.check("stop abandons the fit at once", stopped and len(calls) == 21, str(len(calls)))
+
+
 def test_plot_offers_the_drag_models():
     import matplotlib.pyplot as plt
     from gui.components.plot.plot import Plot
@@ -266,11 +293,50 @@ def test_plot_offers_the_drag_models():
     radio = plot._widgets[-1]
     ax = plt.gcf().axes[0]
     text = lambda: "\n".join(tx.get_text() for a in plt.gcf().axes for tx in a.texts)  # noqa: E731
-    h.check("the fit menu lists 4 models", len(MODELS) == 4, str(list(MODELS)))
+    h.check("the fit menu lists 8 models", len(MODELS) == 8, str(list(MODELS)))
     radio.set_active(list(MODELS).index("drag"))
     h.check("the drag model shows its drag strength k", "k     =" in text(), text()[:120])
     h.check("the drag model has no gamma line", "gamma =" not in text())
     plt.close("all")
+
+
+def test_new_models_recover_their_parameters():
+    """Data made from each of the newer models: the fit of that model recovers its own parameters
+    (the period, and the term the model adds), well within a few seconds."""
+    import time
+    from gui.components.plot.fit import MODELS, fit_model
+    t = np.arange(600) / 30
+    rng = np.random.default_rng(5)
+    cases = [
+        ("damped_exp", (55.0, 0.3, 1.4, 0.2, 10.0, 15.0, 4.0), "ts", 0.1),
+        ("both_exp", (50.0, 0.0, 1.4, 0.15, 0.01, 10.0, 15.0, 5.0), "beta", 0.2),
+        ("gas", (50.0, 0.0, 1.4, 0.2, 0.0, 100.0, 15.0, -0.3), "L", 0.25),
+        ("friction", (50.0, 0.0, 1.4, 0.1, 3.0, 15.0, -0.3), "f", 0.2),
+    ]
+    for key, truth, term, tolerance in cases:
+        spec = MODELS[key]
+        y = spec.func(t, *truth) + rng.normal(0, 0.3, t.size)
+        start = time.time()
+        fit = fit_model(t, y, key)
+        took = time.time() - start
+        true = dict(zip(spec.names, truth))
+        h.check(f"{key}: a close fit, quickly", fit.ok and fit.r2 > 0.99 and took < 10,
+                f"R² {fit.r2:.4f}, {took:.2f} s")
+        h.check(f"{key}: omega is recovered within 2%",
+                abs(fit.params["omega"] - true["omega"]) / true["omega"] < 0.02, f"{fit.params['omega']:.4f}")
+        h.check(f"{key}: {term} is recovered within {tolerance:.0%}",
+                abs(fit.params[term] - true[term]) / true[term] < tolerance,
+                f"{fit.params[term]:.4g} vs {true[term]}")
+
+
+def test_param_lines_cover_every_model():
+    from gui.components.plot.fit import MODELS, FitResult, param_lines
+    for key, spec in MODELS.items():
+        fit = FitResult(ok=True, model=key, params={n: 1.0 for n in spec.names},
+                        errors={n: 0.1 for n in spec.names}, tau=1.0)
+        lines = param_lines(fit, "cm")
+        h.check(f"{key}: one line per parameter, with units", len(lines) == len(spec.names)
+                and all(line.split("=")[0].strip() in spec.names for line in lines), str(lines))
 
 
 def test_initial_drop_is_high_to_first_low():
@@ -286,6 +352,23 @@ def test_initial_drop_is_high_to_first_low():
             abs(drop.y_low - 10) < 0.5, f"t {drop.t_low:.3f}, y {drop.y_low:.2f}")
     h.check("drop and duration are right", abs(drop.drop - 80) < 1 and abs(drop.duration - 1.0) < 0.05,
             f"drop {drop.drop:.2f}, duration {drop.duration:.3f}")
+
+
+def test_initial_drop_from_a_rest():
+    """The object rests at the top (with a little tracking jitter) before it is let go, as in Air
+    Trial 4: the drop runs from the resting place to the first low. It used to find no start
+    (find_peaks never counts the first sample) and give up."""
+    from gui.components.plot.fit import initial_drop
+    t = np.arange(0, 20, 1 / 30)
+    falling = t >= 0.5
+    y = np.full(t.size, 71.2)
+    y[falling] = 12 + 59.2 * np.exp(-0.4 * (t[falling] - 0.5)) * np.cos(1.34 * (t[falling] - 0.5))
+    y[3:7] += [0.05, 0.1, 0.08, 0.05]   # The jitter: a tiny bump at the top, as tracked
+    drop = initial_drop(t, y)
+    h.check("the drop from a rest is found", drop.ok, drop.message)
+    h.check("it starts at the resting place", drop.t_high < 0.55 and abs(drop.y_high - 71.3) < 0.1,
+            f"t {drop.t_high:.2f}, y {drop.y_high:.2f}")
+    h.check("it ends at the first low", abs(drop.t_low - (0.5 + 2.15)) < 0.2, f"t {drop.t_low:.2f}")
 
 
 def test_plot_shows_drop_markers_and_a_legend():
@@ -373,6 +456,9 @@ if __name__ == "__main__":
                  test_range_uses_only_the_selected_part, test_too_few_points_is_refused,
                  test_plot_slider_updates_the_fit,
                  test_quadratic_drag_recovers_the_parameters, test_quadratic_drag_with_drift_recovers_the_slope,
-                 test_plot_offers_the_drag_models, test_initial_drop_is_high_to_first_low,
+                 test_drag_fit_on_damped_data_is_quick_and_stoppable,
+                 test_plot_offers_the_drag_models, test_new_models_recover_their_parameters,
+                 test_param_lines_cover_every_model, test_initial_drop_is_high_to_first_low,
+                 test_initial_drop_from_a_rest,
                  test_plot_shows_drop_markers_and_a_legend,
                  test_save_plot_starts_in_the_project_folder])

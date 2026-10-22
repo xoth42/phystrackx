@@ -8,13 +8,21 @@ Models, with tt = t - t[0] (time from the start of the chosen range):
 
     "damped":        y = C + A * exp(-gamma * tt) * cos(omega * tt + phi)
     "damped_linear": y = C + m * tt + A * exp(-gamma * tt) * cos(omega * tt + phi)
+    "damped_exp":    y = C + D * exp(-tt / ts) + A * exp(-gamma * tt) * cos(omega * tt + phi)
     "drag":          z'' = -omega^2 z - k |z'| z'   (quadratic drag), y = C + z
     "drag_linear":   y = C + m * tt + z, with z solving the same equation
+    "both_exp":      z'' = -omega^2 z - 2 beta z' - k |z'| z'   (linear and quadratic damping),
+                     y = C + D * exp(-tt / ts) + z
+    "gas":           z'' = (omega^2 L / G) [(L / (L + z))^G - 1] - 2 beta z' - k |z'| z',
+                     y = C + m * tt + z   (the air below compressed adiabatically, G = 1.4)
+    "friction":      z'' = -omega^2 z - 2 beta z' - f sgn(z')   (sliding friction),
+                     y = C + m * tt + z
 
-The linear term lets the oscillation settle onto a sloped line rather than a flat one. The drag
-models start from z(0) = z0 with speed z'(0) = v0, so the drag strength k is fitted directly. The
-period of a drag oscillation depends a little on its amplitude, so the fitted omega is the
-small-swing value.
+The linear term lets the oscillation settle onto a sloped line rather than a flat one; the
+exponential term onto a level that sinks quickly at first, then levels off (D, settling time ts).
+The equation-of-motion models start from z(0) = z0 with speed z'(0) = v0, so the damping strengths
+are fitted directly. Their period depends a little on the amplitude, so the fitted omega is the
+small-swing value. The gas spring's L is the air column's length at rest, in the data's unit.
 
 Period: T = 2*pi/omega from the fit, and the spacing of successive peaks and troughs in the data.
 
@@ -46,23 +54,27 @@ def _drag_path(tt, z0: float, v0: float, omega: float, k: float) -> np.ndarray:
     """
     Position of z'' = -omega^2 z - k |z'| z' at the times tt (starting at tt[0] = 0), from
     z(0) = z0 and z'(0) = v0. Each step is one Runge-Kutta (RK4) step over the sample interval.
+    Written out in plain floats (no calls per step): a fit integrates it thousands of times.
     """
-    def accel(z, v):
-        return -omega * omega * z - k * abs(v) * v
-
-    out = np.empty(len(tt))
-    z, v = z0, v0
-    out[0] = z
-    for i in range(1, len(tt)):
-        h = tt[i] - tt[i - 1]
-        k1z, k1v = v, accel(z, v)
-        k2z, k2v = v + h / 2 * k1v, accel(z + h / 2 * k1z, v + h / 2 * k1v)
-        k3z, k3v = v + h / 2 * k2v, accel(z + h / 2 * k2z, v + h / 2 * k2v)
-        k4z, k4v = v + h * k3v, accel(z + h * k3z, v + h * k3v)
-        z += h / 6 * (k1z + 2 * k2z + 2 * k3z + k4z)
-        v += h / 6 * (k1v + 2 * k2v + 2 * k3v + k4v)
-        out[i] = z
-    return out
+    w2, k = float(omega) * float(omega), float(k)
+    z, v = float(z0), float(v0)
+    out = [z]
+    with np.errstate(all="ignore"):
+        for h in np.diff(np.asarray(tt, dtype=float)).tolist():
+            a1 = -w2 * z - k * abs(v) * v
+            v2 = v + 0.5 * h * a1
+            a2 = -w2 * (z + 0.5 * h * v) - k * abs(v2) * v2
+            v3 = v + 0.5 * h * a2
+            a3 = -w2 * (z + 0.5 * h * v2) - k * abs(v3) * v3
+            v4 = v + h * a3
+            a4 = -w2 * (z + h * v3) - k * abs(v4) * v4
+            z += h / 6 * (v + 2 * v2 + 2 * v3 + v4)
+            v += h / 6 * (a1 + 2 * a2 + 2 * a3 + a4)
+            if not abs(z) < 1e12:   # Blown up (a wild trial): far off, so the fit steps back
+                out += [1e12] * (len(tt) - len(out))
+                break
+            out.append(z)
+    return np.array(out)
 
 
 def drag(tt, z0, v0, omega, k, C):
@@ -75,25 +87,119 @@ def drag_linear(tt, z0, v0, omega, k, C, m):
     return drag(tt, z0, v0, omega, k, C) + m * tt
 
 
+def damped_exp(tt, A, gamma, omega, phi, C, D, ts):
+    """Damped oscillation about a level that settles exponentially: C + D exp(-tt / ts)."""
+    return damped(tt, A, gamma, omega, phi, C) + D * np.exp(-tt / ts)
+
+
+GAS_GAMMA = 1.4   # Heat capacity ratio of air, for the gas-spring model's shape
+
+
+def _motion_path(tt, z0: float, v0: float, omega: float, beta: float = 0.0, k: float = 0.0,
+                 f: float = 0.0, L: float = 0.0) -> np.ndarray:
+    """
+    Position of z'' = spring(z) - 2 beta z' - k |z'| z' - f sgn(z') at the times tt, from z(0) = z0
+    and z'(0) = v0, by one RK4 step per sample interval (as _drag_path). The spring is -omega^2 z,
+    or with L > 0 the adiabatic gas spring (omega^2 L / G) [(L / (L + z))^G - 1], which is
+    -omega^2 z for small z.
+    """
+    w2, beta, k, f, L = float(omega) ** 2, float(beta), float(k), float(f), float(L)
+    gas = L > 0
+    c = w2 * L / GAS_GAMMA if gas else 0.0
+    floor = 1e-3 * L   # The column never shrinks below this (a wild trial would divide by zero)
+
+    def acc(z, v):
+        if gas:
+            spring = c * ((L / max(L + z, floor)) ** GAS_GAMMA - 1.0)
+        else:
+            spring = -w2 * z
+        a = spring - 2.0 * beta * v - k * abs(v) * v
+        if f and v:
+            a -= f if v > 0 else -f
+        return a
+
+    z, v = float(z0), float(v0)
+    out = [z]
+    with np.errstate(all="ignore"):
+        for h in np.diff(np.asarray(tt, dtype=float)).tolist():
+            a1 = acc(z, v)
+            v2 = v + 0.5 * h * a1
+            a2 = acc(z + 0.5 * h * v, v2)
+            v3 = v + 0.5 * h * a2
+            a3 = acc(z + 0.5 * h * v2, v3)
+            v4 = v + h * a3
+            a4 = acc(z + h * v3, v4)
+            z += h / 6 * (v + 2 * v2 + 2 * v3 + v4)
+            v += h / 6 * (a1 + 2 * a2 + 2 * a3 + a4)
+            if not abs(z) < 1e12:
+                out += [1e12] * (len(tt) - len(out))
+                break
+            out.append(z)
+    return np.array(out)
+
+
+def both_exp(tt, z0, v0, omega, beta, k, C, D, ts):
+    """Linear and quadratic damping, about a level that settles exponentially."""
+    return C + D * np.exp(-tt / ts) + _motion_path(tt, z0, v0, omega, beta=beta, k=k)
+
+
+def gas(tt, z0, v0, omega, beta, k, L, C, m):
+    """Adiabatic gas spring with linear and quadratic damping, about a straight line."""
+    return C + m * tt + _motion_path(tt, z0, v0, omega, beta=beta, k=k, L=L)
+
+
+def friction(tt, z0, v0, omega, beta, f, C, m):
+    """Linear damping and sliding (dry) friction, about a straight line."""
+    return C + m * tt + _motion_path(tt, z0, v0, omega, beta=beta, f=f)
+
+
 @dataclass(frozen=True)
 class FitModel:
     key: str
     label: str
     names: tuple
     func: object
+    equation: tuple = ()   # Lines of matplotlib mathtext, shown under the model's name
 
 
+_DAMPED = r"A\,e^{-\gamma t}\cos(\omega t + \phi)"
+_SETTLE = r"D\,e^{-t/t_s}"
+_DRAG = r"$\ddot z = -\omega^2 z - k\,|\dot z|\,\dot z$"
+_BOTH = r"$\ddot z = -\omega^2 z - 2\beta\dot z - k\,|\dot z|\,\dot z$"
+_GAS = (r"$\ddot z = \frac{\omega^2 L}{\Gamma}\left[\left(\frac{L}{L + z}\right)^{\Gamma} - 1\right]"
+        r" - 2\beta\dot z - k\,|\dot z|\,\dot z$")
+_FRICTION = r"$\ddot z = -\omega^2 z - 2\beta\dot z - f\,\mathrm{sgn}(\dot z)$"
 MODELS = {
     "damped": FitModel("damped", "Damped oscillator",
-                       ("A", "gamma", "omega", "phi", "C"), damped),
-    "damped_linear": FitModel("damped_linear", "Damped oscillator + linear drift",
-                              ("A", "gamma", "omega", "phi", "C", "m"), damped_linear),
-    "drag": FitModel("drag", "Quadratic drag oscillator",
-                     ("z0", "v0", "omega", "k", "C"), drag),
+                       ("A", "gamma", "omega", "phi", "C"), damped,
+                       (rf"$y = C + {_DAMPED}$",)),
+    "damped_linear": FitModel("damped_linear", "Damped + linear drift",
+                              ("A", "gamma", "omega", "phi", "C", "m"), damped_linear,
+                              (rf"$y = C + m t + {_DAMPED}$",)),
+    "damped_exp": FitModel("damped_exp", "Damped + exponential settling",
+                           ("A", "gamma", "omega", "phi", "C", "D", "ts"), damped_exp,
+                           (rf"$y = C + {_SETTLE} + {_DAMPED}$",)),
+    "drag": FitModel("drag", "Quadratic drag",
+                     ("z0", "v0", "omega", "k", "C"), drag,
+                     (_DRAG + r",  $y = C + z$",)),
     "drag_linear": FitModel("drag_linear", "Quadratic drag + linear drift",
-                            ("z0", "v0", "omega", "k", "C", "m"), drag_linear),
+                            ("z0", "v0", "omega", "k", "C", "m"), drag_linear,
+                            (_DRAG + r",  $y = C + m t + z$",)),
+    "both_exp": FitModel("both_exp", "Linear + quadratic damping + exp. settling",
+                         ("z0", "v0", "omega", "beta", "k", "C", "D", "ts"), both_exp,
+                         (_BOTH, rf"$y = C + {_SETTLE} + z$")),
+    "gas": FitModel("gas", "Gas spring + both dampings + drift",
+                    ("z0", "v0", "omega", "beta", "k", "L", "C", "m"), gas,
+                    (_GAS, r"$y = C + m t + z$,  $\Gamma = 1.4$")),
+    "friction": FitModel("friction", "Sliding friction + drift",
+                         ("z0", "v0", "omega", "beta", "f", "C", "m"), friction,
+                         (_FRICTION + r",  $y = C + m t + z$",)),
 }
+EQUATION_NOTE = r"$t$: time from the range's start; $z(0) = z_0$, $\dot z(0) = v_0$"
 DEFAULT_MODEL = "damped_linear"
+
+# Parameters that cannot be negative (a rate, a frequency, a strength, a time or a length)
+_NON_NEGATIVE = {"gamma", "omega", "beta", "k", "f", "ts", "L"}
 
 
 @dataclass
@@ -120,7 +226,24 @@ class PeakPeriods:
     n_intervals: int
 
 
-def fit_model(t, y, model: str = DEFAULT_MODEL, warm: "FitResult | None" = None) -> FitResult:
+class FitStopped(Exception):
+    """The fit was abandoned (its `stop` said so): the plot was closed, or the range moved on."""
+
+
+def _stoppable(func, stop):
+    """func, raising FitStopped when stop() turns true (checked on every evaluation)."""
+    if stop is None:
+        return func
+
+    def checked(tt, *p):
+        if stop():
+            raise FitStopped()
+        return func(tt, *p)
+    return checked
+
+
+def fit_model(t, y, model: str = DEFAULT_MODEL, warm: "FitResult | None" = None,
+              stop=None) -> FitResult:
     """
     Fits the chosen model to (t, y). Non-finite values are dropped.
 
@@ -129,6 +252,8 @@ def fit_model(t, y, model: str = DEFAULT_MODEL, warm: "FitResult | None" = None)
 
     warm: a previous fit with the same model (for example of a slightly different range). Its
     parameters are tried first, which is much faster when the slider only moves a little.
+    stop: a function checked on every trial; when it returns True the fit raises FitStopped (so a
+    fit on another thread can be abandoned).
     """
     spec = MODELS[model]
     t = np.asarray(t, dtype=float)
@@ -153,26 +278,29 @@ def fit_model(t, y, model: str = DEFAULT_MODEL, warm: "FitResult | None" = None)
     m0 = float(np.polyfit(tt, y, 1)[0]) if linear else None
 
     # Starting frequency: the strongest peak of the spectrum (zero-padded for finer steps)
-    z = (y - C0) * np.hanning(len(y))
+    # A straight line is taken off first, and frequencies with less than one cycle in the range are
+    # left out, so a slow fall (a big first drop) is not taken for the swing
+    z = (y - np.polyval(np.polyfit(tt, y, 1), tt)) * np.hanning(len(y))
     n_fft = 16 * len(z)
     spectrum = np.abs(np.fft.rfft(z, n_fft))
     freqs = np.fft.rfftfreq(n_fft, dt)
-    spectrum[0] = 0.0
+    spectrum[freqs < 1.0 / duration] = 0.0
     w0 = 2 * math.pi * float(freqs[int(np.argmax(spectrum))])
     if w0 <= 0:
         return FitResult(ok=False, model=model, message="No oscillation found in the range", t0=t0)
     g0 = 1.0 / max(duration, dt)
 
-    if spec.key.startswith("drag"):
-        return _fit_drag(tt, y, spec, t0, w0, A0, C0, m0, warm)
+    if "z0" in spec.names:
+        return _fit_motion(tt, y, spec, t0, w0, A0, C0, m0, warm, stop)
 
-    n = len(spec.names)
-    lower = [-np.inf, 0.0, 0.0, -np.inf] + [-np.inf] * (n - 4)
-    upper = [np.inf] * n
+    lower, upper = _bounds(spec, dt, duration, A0)
+    settle = "D" in spec.names
+    func = _stoppable(spec.func, stop)
 
     def attempt(p0, maxfev):
         try:
-            popt, pcov = curve_fit(spec.func, tt, y, p0=p0, bounds=(lower, upper), maxfev=maxfev)
+            popt, pcov = curve_fit(func, tt, y, p0=np.clip(p0, lower, upper),
+                                   bounds=(lower, upper), maxfev=maxfev)
         except (RuntimeError, ValueError):
             return None
         return float(np.sum((spec.func(tt, *popt) - y) ** 2)), popt, pcov
@@ -187,7 +315,18 @@ def fit_model(t, y, model: str = DEFAULT_MODEL, warm: "FitResult | None" = None)
         if best is not None and sst > 0 and 1.0 - best[0] / sst >= GOOD_FIT_R2:
             return _result(best, spec, t0, sst, y)  # Good enough: skip the search
 
-    base = [A0, g0, w0, 0.0, C0] + ([m0] if linear else [])
+    # A close start, found by linear least squares: for a few frequencies and decay rates the model
+    # is linear in C (and m) and the cosine and sine amplitudes. Usually one fit from there is enough
+    seed = _linear_seed(tt, y, w0, g0, linear, settle)
+    if seed is not None:
+        result = attempt(seed, maxfev=2000)
+        if result is not None and (best is None or result[0] < best[0]):
+            best = result
+        if best is not None and sst > 0 and 1.0 - best[0] / sst >= GOOD_FIT_R2:
+            return _result(best, spec, t0, sst, y)
+
+    base = [A0, g0, w0, 0.0, C0] + ([m0] if linear else []) + \
+        ([0.5 * (float(y[0]) - C0), duration / 5] if settle else [])
     for phi0 in np.linspace(-math.pi, math.pi, 12, endpoint=False):
         p0 = list(base)
         p0[3] = phi0
@@ -201,40 +340,134 @@ def fit_model(t, y, model: str = DEFAULT_MODEL, warm: "FitResult | None" = None)
     return _result(best, spec, t0, sst, y)
 
 
-def _fit_drag(tt, y, spec: FitModel, t0: float, w0: float, A0: float, C0: float,
-              m0: float | None, warm: "FitResult | None") -> FitResult:
+def _bounds(spec: FitModel, dt: float, duration: float, A0: float):
+    """Lower and upper bounds of the model's parameters: rates, strengths, times and lengths are
+    non-negative; the settling time stays between half a sample and a few ranges (a longer one is
+    a straight line, which C and m already cover); the gas column is longer than half the swing."""
+    lower, upper = [], []
+    for name in spec.names:
+        lo = 0.0 if name in _NON_NEGATIVE else -np.inf
+        hi = np.inf
+        if name == "ts":
+            lo, hi = dt / 2, 5 * duration
+        elif name == "L":
+            lo = A0
+        lower.append(lo)
+        upper.append(hi)
+    return lower, upper
+
+
+def _linear_seed(tt, y, w0: float, g0: float, linear: bool, settle: bool = False) -> list | None:
+    """Starting parameters (A, gamma, omega, phi, C[, m][, D, ts]) for the damped models: over a
+    small grid of omega (about the spectrum's peak), gamma (and the settling time ts), the best
+    linear least-squares fit of C (+ m tt) (+ D e^(-tt/ts)) + e^(-gamma tt) (a cos(omega tt) +
+    b sin(omega tt))."""
+    duration = float(tt[-1])
+    best = None
+    for w in w0 * np.linspace(0.85, 1.15, 7):
+        for g in g0 * np.array([0.5, 1, 2, 4, 8, 16]):
+            for ts in (duration * np.array([0.05, 0.1, 0.2, 0.4]) if settle else [None]):
+                decay = np.exp(-g * tt)
+                columns = [np.ones_like(tt), decay * np.cos(w * tt), decay * np.sin(w * tt)]
+                if linear:
+                    columns.append(tt)
+                if settle:
+                    columns.append(np.exp(-tt / ts))
+                basis = np.column_stack(columns)
+                coef, *_ = np.linalg.lstsq(basis, y, rcond=None)
+                sse = float(np.sum((basis @ coef - y) ** 2))
+                if best is None or sse < best[0]:
+                    best = (sse, w, g, ts, coef)
+    if best is None or not np.all(np.isfinite(best[4])):
+        return None
+    _, w, g, ts, coef = best
+    a, b = coef[1], coef[2]   # a cos + b sin = A cos(w tt + phi), with a = A cos phi, b = -A sin phi
+    return [float(math.hypot(a, b)), float(g), float(w), float(math.atan2(-b, a)), float(coef[0])] + \
+        ([float(coef[3])] if linear else []) + ([float(coef[-1]), float(ts)] if settle else [])
+
+
+def _motion_starts(spec: FitModel, tt, y, stop) -> list:
     """
-    Fit of a quadratic-drag model. Each trial integrates the motion, so the search uses a few
-    starting points: the swing from both ends and both directions of the first speed. A warm
-    start (the previous fit of this model) is tried first, so a slider move is quick.
+    Starts for an equation-of-motion model, from the damped fit of the same data (with the same
+    drift or settling): the same first position and speed and the natural frequency, with the
+    fitted decay shared out among the model's damping terms in a few ways. A decay rate gamma
+    matches, at the amplitude a:
+      linear damping:    beta = gamma
+      quadratic drag:    k = 3 pi gamma / (4 omega a)    (dA/dt = -(4 / 3 pi) k omega A^2)
+      sliding friction:  f = pi omega gamma a / 2        (dA/dt = -2 f / (pi omega))
+    """
+    names = spec.names
+    base_model = "damped_exp" if "D" in names else "damped_linear" if "m" in names else "damped"
+    damped_fit = fit_model(tt, y, base_model, stop=stop)
+    if not damped_fit.ok:
+        return []
+    p = damped_fit.params
+    A, g, w, phi = p["A"], p["gamma"], p["omega"], p["phi"]
+    wn = math.sqrt(w * w + g * g)
+    amp = max(A, 1e-9)
+    common = dict(z0=A * math.cos(phi), v0=-A * (g * math.cos(phi) + w * math.sin(phi)), omega=wn,
+                  C=p["C"], m=p.get("m", 0.0), D=p.get("D", 0.0), ts=p.get("ts", 1.0))
+
+    def k_for(a):
+        return 3 * math.pi * g / (4 * wn * max(a, 1e-9))
+
+    if "f" in names:
+        shares = [dict(beta=g, f=0.0), dict(beta=g / 2, f=math.pi * wn * g * amp / 8),
+                  dict(beta=0.0, f=math.pi * wn * g * amp / 4)]
+    elif "beta" in names:
+        shares = [dict(beta=g, k=0.0), dict(beta=g / 2, k=k_for(amp) / 2), dict(beta=0.0, k=k_for(amp))]
+    else:
+        shares = [dict(k=k_for(amp)), dict(k=k_for(amp / 2))]
+    if "L" in names:   # A long column (nearly a plain spring) and a short one (a lopsided swing)
+        shares = [dict(s, L=Lc) for s in shares[1:2] for Lc in (30 * amp, 3 * amp)] + \
+            [dict(shares[0], L=30 * amp)]
+    return [[{**common, **s}[name] for name in names] for s in shares]
+
+
+def _fit_motion(tt, y, spec: FitModel, t0: float, w0: float, A0: float, C0: float,
+                m0: float | None, warm: "FitResult | None", stop=None) -> FitResult:
+    """
+    Fit of an equation-of-motion model (quadratic drag, both dampings, gas spring, sliding
+    friction). Each trial integrates the motion, so the search starts close: from the damped fit of
+    the same data (_motion_starts). A warm start (the previous fit of this model) is tried first,
+    so a slider move is quick. Rough starts from the data are tried only if those fail. Every
+    attempt is capped, so the fit takes about a second on a long range, never minutes.
     """
     linear = "m" in spec.names
-    n = len(spec.names)
     sst = float(np.sum((y - y.mean()) ** 2))
-    # z0, v0, omega, k, C (and m): drag strength k and the frequency must stay non-negative
-    lower = [-np.inf, -np.inf, 0.0, 0.0, -np.inf] + [-np.inf] * (n - 5)
-    upper = [np.inf] * n
+    duration = float(tt[-1])
+    lower, upper = _bounds(spec, float(np.median(np.diff(tt))), duration, A0)
+    func = _stoppable(spec.func, stop)
 
     def attempt(p0, maxfev):
         try:
-            popt, pcov = curve_fit(spec.func, tt, y, p0=p0, bounds=(lower, upper), maxfev=maxfev)
+            popt, pcov = curve_fit(func, tt, y, p0=np.clip(p0, lower, upper),
+                                   bounds=(lower, upper), maxfev=maxfev, x_scale="jac")
         except (RuntimeError, ValueError):
             return None
         return float(np.sum((spec.func(tt, *popt) - y) ** 2)), popt, pcov
 
+    def good(result):
+        return result is not None and sst > 0 and 1.0 - result[0] / sst >= GOOD_FIT_R2
+
     best = None
     if warm is not None and warm.ok and warm.model == spec.key:
-        p_w = [warm.params[k] for k in spec.names]
-        best = attempt(p_w, maxfev=200)
-        if best is not None and sst > 0 and 1.0 - best[0] / sst >= GOOD_FIT_R2:
+        best = attempt([warm.params[k] for k in spec.names], maxfev=60)
+        if good(best):
             return _result_drag(best, spec, t0, sst)
 
-    for z0 in (A0, -A0):
-        for v0 in (w0 * A0, -w0 * A0):
-            base = [z0, v0, w0, 0.01 * w0 * w0 / max(A0, 1e-9), C0] + ([m0] if linear else [])
-            result = attempt(base, maxfev=2000)
-            if result is not None and (best is None or result[0] < best[0]):
-                best = result
+    for result in (attempt(p0, maxfev=150) for p0 in _motion_starts(spec, tt, y, stop)):
+        if result is not None and (best is None or result[0] < best[0]):
+            best = result
+
+    if not good(best):   # The damped start did not lead to a good fit: the rough starts too
+        for z0 in (A0, -A0):
+            for v0 in (w0 * A0, -w0 * A0):
+                rough = dict(z0=z0, v0=v0, omega=w0, beta=0.0, k=0.01 * w0 * w0 / max(A0, 1e-9),
+                             f=0.0, L=30 * A0, C=C0, m=m0 or 0.0, D=0.0, ts=duration / 5)
+                result = attempt([rough[name] for name in spec.names], maxfev=100)
+                if result is not None and (best is None or result[0] < best[0]):
+                    best = result
 
     if best is None:
         return FitResult(ok=False, model=spec.key,
@@ -257,6 +490,28 @@ def _result_drag(best, spec: FitModel, t0: float, sst: float) -> FitResult:
     return FitResult(ok=True, message=message, model=spec.key, params=params, errors=errors,
                      r2=r2, period=period, period_err=period_err, tau=float("nan"), t0=t0,
                      phi_abs=0.0)
+
+
+# Each parameter's unit ("{u}" is the data's unit), and how many significant figures it gets
+_PARAM_UNITS = {"A": "{u}", "z0": "{u}", "C": "{u}", "D": "{u}", "L": "{u}", "v0": "{u}/s",
+                "m": "{u}/s", "omega": "rad/s", "gamma": "/s", "beta": "/s", "k": "/{u}",
+                "f": "{u}/s²", "phi": "rad", "ts": "s"}
+_PRECISE = {"omega", "C", "m"}
+
+
+def param_lines(fit: FitResult, unit: str = "") -> list:
+    """The fit's parameters, one line each with its error and unit (for the results panels).
+    gamma also gets its decay time tau = 1/gamma."""
+    lines = []
+    for name in MODELS[fit.model].names:
+        value, err = fit.params[name], fit.errors[name]
+        u = _PARAM_UNITS[name].format(u=unit if name != "k" else unit or "unit")
+        digits = 4 if name in _PRECISE else 3
+        line = f"{name:<5} = {value:.{digits}g} ± {err:.2g}" + (f" {u}" if u else "")
+        if name == "gamma":
+            line += f"   tau = {fit.tau:.3g} s"
+        lines.append(line)
+    return lines
 
 
 def fit_damped(t, y, warm: "FitResult | None" = None) -> FitResult:
@@ -341,10 +596,13 @@ class InitialDrop:
 
 def initial_drop(t, y) -> InitialDrop:
     """
-    The initial drop of a motion: from the first high (where the movement starts) to the first low
-    after it (the first turnaround of the period).
+    The initial drop of a motion: from where the movement starts (the highest point before the
+    first low) to the first low (the first turnaround of the period).
 
-    Highs and lows must stand out by a fifth of the signal's range, as for peak_periods.
+    The first low is the first trough that stands out by a fifth of the signal's range (as for
+    peak_periods). The start is the highest point before it, so an object resting at the top
+    before it is let go is measured from its resting place (find_peaks would miss that high: it
+    never counts the first sample, and a rest has no clear peak).
     """
     t = np.asarray(t, dtype=float)
     y = np.asarray(y, dtype=float)
@@ -355,21 +613,13 @@ def initial_drop(t, y) -> InitialDrop:
     if len(t) < 3 or np.ptp(y) <= 0:
         return InitialDrop(ok=False, message="Select a range with a clear movement")
     prominence = 0.2 * float(np.ptp(y))
-    maxima, _ = find_peaks(y, prominence=prominence)
     minima, _ = find_peaks(-y, prominence=prominence)
-    # The range may start on the high itself (the movement begins at its first sample): find_peaks
-    # never counts the ends, so the first sample counts when the signal falls from it
-    starts_high = y[0] > y[1] and minima.size > 0 and y[0] - y[minima[0]] >= prominence
-    if starts_high and (maxima.size == 0 or maxima[0] > 0):
-        start = 0
-    elif maxima.size:
-        start = int(maxima[0])
-    else:
-        return InitialDrop(ok=False, message="No starting high in the range")
-    after = minima[minima > start]
-    if after.size == 0:
-        return InitialDrop(ok=False, message="No first low after the starting high")
-    low = int(after[0])
+    if minima.size == 0:
+        return InitialDrop(ok=False, message="No clear low in the range")
+    low = int(minima[0])
+    start = int(np.argmax(y[:low + 1]))
+    if y[start] - y[low] < prominence:
+        return InitialDrop(ok=False, message="No starting high before the first low")
     return InitialDrop(ok=True, t_high=float(t[start]), y_high=float(y[start]),
                        t_low=float(t[low]), y_low=float(y[low]))
 

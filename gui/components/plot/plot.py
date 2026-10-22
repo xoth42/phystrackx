@@ -17,7 +17,8 @@ from matplotlib.widgets import Button, RadioButtons, RangeSlider
 from gui.components.checkbox import Checkbox
 from .plottype import PlotType
 from .datamanager import DataManager
-from .fit import DEFAULT_MODEL, MODELS, best_period, fit_model, initial_drop, peak_periods
+from .fit import (DEFAULT_MODEL, MODELS, best_period, fit_model, initial_drop, param_lines,
+                  peak_periods)
 
 
 class Plot:
@@ -180,7 +181,7 @@ class Plot:
                              valinit=(float(t[0]), float(t[-1])))
 
         keys = list(MODELS)
-        radio_ax = fig.add_axes([0.01, 0.42, 0.2, 0.14], frameon=False)
+        radio_ax = fig.add_axes([0.01, 0.3, 0.22, 0.03 * len(keys)], frameon=False)
         radio_ax.set_title("Fit", fontsize=9, loc="left")
         radio = RadioButtons(radio_ax, [MODELS[k].label for k in keys],
                              active=keys.index(DEFAULT_MODEL))
@@ -276,25 +277,7 @@ def _summary(fit, peaks, period, perr, source, unit: str = "", drop=None) -> str
     Amplitude, offset, and drop are in `unit`."""
     lines = []
     if fit.ok:
-        p, e = fit.params, fit.errors
-        u = f" {unit}" if unit else ""
-        if fit.model.startswith("drag"):
-            lines += [
-                f"z0    = {p['z0']:.3g} ± {e['z0']:.2g}{u}",
-                f"v0    = {p['v0']:.3g} ± {e['v0']:.2g}{u}/s",
-                f"omega = {p['omega']:.4g} ± {e['omega']:.2g} rad/s",
-                f"k     = {p['k']:.3g} ± {e['k']:.2g} /{unit or 'unit'}",
-                f"C     = {p['C']:.4g} ± {e['C']:.2g}{u}",
-            ]
-        else:
-            lines += [
-                f"A     = {p['A']:.3g} ± {e['A']:.2g}{u}",
-                f"gamma = {p['gamma']:.3g} ± {e['gamma']:.2g} /s   tau = {fit.tau:.3g} s",
-                f"omega = {p['omega']:.4g} ± {e['omega']:.2g} rad/s",
-                f"phi   = {p['phi']:.3g} ± {e['phi']:.2g} rad",
-                f"C     = {p['C']:.4g} ± {e['C']:.2g}{u}",
-            ]
-        lines += ([f"m     = {p['m']:.4g} ± {e['m']:.2g}{u}/s"] if "m" in p else []) + [
+        lines += param_lines(fit, unit) + [
             f"R²    = {fit.r2:.4f}",
             f"T fit = {fit.period:.4g} ± {fit.period_err:.2g} s",
         ]

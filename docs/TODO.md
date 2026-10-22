@@ -1,6 +1,29 @@
 # TODO
 
 ## Last done (newest first)
+- **Quadratic drag fit froze the plot (fixed).** On Air Trial 4's distance it took 87 s (12 s with
+  drift), on the window's thread. The integration is written out in plain floats (6x faster), and
+  the fit starts from the damped fit of the same data, so it takes about a second. In the Qt app
+  the fit runs on a worker thread: the window can be closed (that stops the fit), and the main
+  window stays usable. Each model's equation is shown under its name in the Qt fit menu (the
+  `equation` field of `fit.MODELS`); the Tk plot does not show them yet.
+- **Plots open fast (Qt).** matplotlib and scipy load on a background thread after start-up
+  (`plot_warmup.py`, was 1.9 s on the first plot). The data shows at once; the fit, menu, slider
+  and results follow together with the first fit. The worker fits the other models ahead, at low
+  priority, so choosing one shows it at once. The damped fits start from a linear least-squares
+  seed (0.6 s → 0.02 s on Air Trial 4; the spectrum's peak had been the slow fall, not the swing).
+- **Initial drop from a rest (fixed):** a ball resting at the top before release gave "No first
+  low after the starting high". The start is now the highest point before the first clear low.
+- **Four more fit models, and a model table (Qt).** Added to `fit.MODELS`: damped + exponential
+  settling, linear + quadratic damping + exponential settling, gas spring + both dampings + drift,
+  sliding friction + drift (equation-of-motion fits share `_fit_motion`; summaries share
+  `param_lines`). On Air Trial 4 (trimmed start), R² / T: damped + drift 0.9839 / 4.540 s,
+  damped + settling 0.9951 / 4.610 s, both dampings + settling 0.9970 / 4.469 s, gas spring
+  0.9961 / 4.433 s (L = 99 ± 6 cm), friction 0.9839 (f fits to 0: no sign of dry friction). The
+  period moves by up to 5% between models, so the model matters for the heat capacity ratio. The
+  Qt plot's radio menu is now a table beside the figure (`fit_table.py`): a large row per model
+  with its equation, R² and T as the fits come in (best R² in bold); a click or Up / Down switches.
+  The Tk plot keeps its radio menu (now 8 entries, no equations).
 - **Zoom and pan broke overlay positions and scales (fixed).** The zoomed picture was drawn from
   a whole-pixel crop stretched to a fixed size, while ruler, axes, boxes and tracked points use the
   exact transform. Rounding the crop could drop a pixel and change the scale by about 2%, so
@@ -85,8 +108,14 @@
   with jumps for covers and kicks for bounces), the physics fit and label-free checks
   (`experiments/rigid/physics.py`), the selection offset (`selection_offset`: a shiny ball's blob
   centre is pulled toward its highlight by 2-4 px; the selection's centre corrects it), outline
-  selections (as the Qt app gives), and real labelled clips (`tests/real_clips.py`,
-  `label_real.py`, `prelabel_real.py`). Compare with `tests/bench_tracker.py`. Still to do:
+  selections (as the Qt app gives), the ring centre (`experiments/rigid/ringfit.py`, `ring_centre`:
+  each position moved to a circle fitted to the edges of frame minus background; on Air Trial 2
+  from a rough circle it took the track from 2.2 px to 0.2 px off the ball's outline, and removed a
+  2 px sideways jump when the blurred ball starts moving; neutral on the synthetic benchmark), and
+  real labelled clips (`tests/real_clips.py`, `label_real.py`, `prelabel_real.py`). Compare with
+  `tests/bench_tracker.py`. Still to do:
+  - The pre-filled labels' edge circle (`prelabel_real.edge_centre`) runs on the plain frame, so a
+    tube wall along the ball's edge pulls it 1-2 px: redo them with ringfit on frame minus background.
   - Check the pre-filled real labels by hand (they are tracker-made, then moved to a circle fit).
   - The selection offset is wrong when a hand covers the ball on frame 0 (the dropped-ball scene);
     an outline that leaves the fingers out should fix it: check with the Qt selection.

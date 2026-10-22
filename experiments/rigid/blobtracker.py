@@ -35,11 +35,8 @@ from dataclasses import asdict, dataclass, fields
 
 import cv2
 import numpy as np
-import trackpy as tp
 
 from core import PixelRect
-
-tp.quiet()
 
 
 @dataclass
@@ -217,6 +214,11 @@ def locate_direct(image: np.ndarray, diameter: int, percentile: float = 64.0,
     return found
 
 
+def _std(a) -> float:
+    """Standard deviation of a small float32 patch (OpenCV: much faster than numpy's on small arrays)."""
+    return float(cv2.meanStdDev(a)[1][0, 0])
+
+
 def outline_circle(outline) -> tuple[np.ndarray, float]:
     """The centre (centroid) and radius (of the circle with the same area) of an outline: a polygon
     of (x, y) points, or a boolean mask."""
@@ -385,7 +387,10 @@ class BlobTracker:
 
     @staticmethod
     def _gray(frame) -> np.ndarray:
-        return (cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY) if frame.ndim == 3 else frame).astype(np.float32)
+        """The frame in grey, as it comes (8-bit stays 8-bit: only the windows looked at are
+        turned into float32, which saves converting whole large frames)."""
+        g = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY) if frame.ndim == 3 else frame
+        return g if g.dtype in (np.uint8, np.float32) else g.astype(np.float32)
 
     def _feature(self, gray, centre, reach):
         """The feature image of a window around `centre`, and the window's corner."""
@@ -396,7 +401,7 @@ class BlobTracker:
         if x1 - x0 < 2 * self.d or y1 - y0 < 2 * self.d:
             return None, x0, y0
         bg = None if self.background is None else self.background[y0:y1, x0:x1]
-        return feature_image(gray[y0:y1, x0:x1], self.r, self.s, bg), x0, y0
+        return feature_image(gray[y0:y1, x0:x1].astype(np.float32), self.r, self.s, bg), x0, y0
 
     def _blobs(self, gray, centre, reach) -> np.ndarray:
         """Ball-sized blobs within `reach` of `centre`, as rows of (x, y, mass) in frame pixels."""
@@ -410,6 +415,8 @@ class BlobTracker:
             found[:, 0] += x0
             found[:, 1] += y0
             return found
+        import trackpy as tp   # Only for finder "trackpy" (it needs pandas; "direct" does not)
+        tp.quiet()
         found = tp.locate(image, self.d, separation=self.d, preprocess=False,
                           characterize=False, engine="python")
         if not len(found):
@@ -434,7 +441,7 @@ class BlobTracker:
         cx, cy = int(round(centre[0])), int(round(centre[1]))
         if cx - k < 0 or cy - k < 0 or cx + k + 1 > gray.shape[1] or cy + k + 1 > gray.shape[0]:
             return None
-        return gray[cy - k:cy + k + 1, cx - k:cx + k + 1].copy()
+        return gray[cy - k:cy + k + 1, cx - k:cx + k + 1].astype(np.float32)
 
     def _match(self, gray, centre) -> float:
         """Normalised correlation between the ball's picture and the picture at `centre`,
@@ -445,8 +452,8 @@ class BlobTracker:
         cx, cy = int(round(centre[0])), int(round(centre[1]))
         if cx - k < 0 or cy - k < 0 or cx + k + 1 > gray.shape[1] or cy + k + 1 > gray.shape[0]:
             return 0.0
-        area = gray[cy - k:cy + k + 1, cx - k:cx + k + 1]
-        if float(area.std()) < self.s.flat or float(self.ref.std()) < self.s.flat:
+        area = gray[cy - k:cy + k + 1, cx - k:cx + k + 1].astype(np.float32)
+        if _std(area) < self.s.flat or _std(self.ref) < self.s.flat:
             return 0.0  # A flat patch matches anything: it says nothing
         return float(cv2.matchTemplate(area, self.ref, cv2.TM_CCOEFF_NORMED).max())
 
@@ -461,7 +468,7 @@ class BlobTracker:
         x1, y1 = min(w, int(around[0] + reach) + k + 1), min(h, int(around[1] + reach) + k + 1)
         if x1 - x0 <= 2 * k + 1 or y1 - y0 <= 2 * k + 1:
             return None
-        res = cv2.matchTemplate(gray[y0:y1, x0:x1], self.ref, cv2.TM_CCOEFF_NORMED)
+        res = cv2.matchTemplate(gray[y0:y1, x0:x1].astype(np.float32), self.ref, cv2.TM_CCOEFF_NORMED)
         _, score, _, (px, py) = cv2.minMaxLoc(res)
         if score < s.template_score:
             return None

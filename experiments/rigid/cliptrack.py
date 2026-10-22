@@ -17,7 +17,9 @@ Engines:
 No GUI here. Author: Isam Balghari
 """
 
+import threading
 import time
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 
 import cv2
@@ -26,6 +28,21 @@ import numpy as np
 from core import PixelRect
 
 LOST, MEASURED, FILLED = 0, 1, 2
+_run = threading.local()   # The running track_frames' progress callback, per thread (see track_frames)
+RING_FROM = 0.9            # Share of the progress before the ring-centre pass (when there is one)
+
+
+def _stage(lo: float, hi: float, name: str) -> None:
+    """The next part of the run: it fills the progress from `lo` to `hi`."""
+    _run.stage = (lo, hi if not getattr(_run, "ring", False) or hi < RING_FROM else RING_FROM, name)
+
+
+def _tick(done: int, total: int) -> None:
+    """Progress within the current stage (frame `done` of its `total`)."""
+    report = getattr(_run, "progress", None)
+    if report is not None:
+        lo, hi, name = getattr(_run, "stage", (0.0, 1.0, "Tracking"))
+        report(lo + (hi - lo) * done / max(1, total), done, name)
 
 
 @dataclass
@@ -35,6 +52,7 @@ class ClipTrack:
     score: np.ndarray        # (n,) how sure the engine is (0..1; 0 where lost)
     ms_per_frame: float      # The engine's CPU time per frame, everything included
     stopped_at: int | None = None  # The frame a time budget stopped it at (the rest counts as lost)
+    background: np.ndarray | None = None  # The still background the engine used, if any
 
     @property
     def lost(self) -> np.ndarray:
@@ -42,14 +60,23 @@ class ClipTrack:
 
 
 def track_frames(frames, rect: PixelRect, engine: str = "blob", settings: dict | None = None,
-                 budget: float | None = None, outline=None) -> ClipTrack:
+                 budget: float | None = None, outline=None, progress=None, partial=None) -> ClipTrack:
     """Tracks the object selected by `rect` on frame 0 through `frames`. With a `budget` (ms per
     frame), a run that is slower than that on average after 10 frames stops there. With the
     setting "physics" true, the track is refined by the ball's motion (physics.refine) at the end.
     `outline` is the object's outline on frame 0 when the selection gives one (a polygon of (x, y)
     points or a boolean mask): its centroid is the centre and its area the size, and `rect` may
-    then be None."""
+    then be None. `progress`, if given, is called as progress(fraction, frame, stage) as it goes:
+    the share of the whole run done (0..1, over all its passes), the frame it is on, and what it
+    is doing (an exception it raises stops the run there). `partial`, if given, is called as
+    partial(centre, status) with the best path so far while the whole-clip engine reads (a few
+    times a second). With the setting "ring_centre" true, each position is moved to the centre of
+    the ball's round outline at the end (ringfit.py: a shiny ball's highlights, smeared by motion
+    blur, pull a blob centre aside)."""
+    _run.progress, _run.partial = progress, partial
     values = settings or {}
+    ring = bool(values.get("ring_centre"))
+    _run.ring = ring
     if outline is not None:
         from experiments.rigid.blobtracker import outline_circle
         (cx, cy), rad = outline_circle(outline)
@@ -62,6 +89,13 @@ def track_frames(frames, rect: PixelRect, engine: str = "blob", settings: dict |
         out = _track_offline(frames, sel, values, budget)
     else:
         raise ValueError(f"unknown tracking engine: {engine}")
+    if ring and out.stopped_at is None:
+        from experiments.rigid.ringfit import ring_refine
+        start = time.process_time()
+        _stage(RING_FROM, 1.0, "Finding the centres")
+        out.centre, _, _ = ring_refine(frames, out.centre, out.status, _radius(sel), out.background,
+                                       MEASURED, _tick)
+        out.ms_per_frame += 1000 * (time.process_time() - start) / max(1, len(frames) - 1)
     if values.get("physics"):
         from experiments.rigid.physics import PhysicsSettings, refine
         start = time.process_time()
@@ -79,18 +113,26 @@ def _track_blob(frames, sel, values, budget) -> ClipTrack:
     s = BlobSettings.from_dict(values)
     start = time.process_time()  # This process's CPU time: not inflated by other work on the machine
     if s.background_mix <= 0:
+        _stage(0.0, 1.0, "Tracking")
         return _blob_pass(frames, sel, s, None, budget, start)
     first, background, again = _background_passes(frames, sel, s, budget, start)
     if not again:
+        first.background = background
         return first
-    return _blob_pass(frames, sel, s, background, budget, start)
+    _stage(0.5, 1.0, "Tracking, second pass")
+    out = _blob_pass(frames, sel, s, background, budget, start)
+    out.background = background
+    return out
 
 
 def _background_passes(frames, sel, s, budget, start):
     """The clip's background, and a first blob-tracker pass on it: (first pass, background, whether
     the background was taken again without the ball's resting place)."""
     from experiments.rigid.background import estimate_background, rested, sample_frames
+    _stage(0.0, 0.05, "Taking the still background")
+    _tick(0, 1)
     background = estimate_background(frames)
+    _stage(0.05, 0.5, "Tracking")
     first = _blob_pass(frames, sel, s, background, budget, start)
     if background is None or first.stopped_at is not None:
         return first, background, False
@@ -100,7 +142,7 @@ def _background_passes(frames, sel, s, budget, start):
     if not rested(points, r, s.ghost_share):
         return first, background, False
     exclude = {int(i): (*first.centre[i], 2 * r) for i in picks if not first.lost[i]}
-    return first, estimate_background(frames, exclude=exclude), True
+    return first, estimate_background(frames, exclude=exclude, base=background), True
 
 
 def _blob_pass(frames, sel, s, background, budget, start) -> ClipTrack:
@@ -113,6 +155,7 @@ def _blob_pass(frames, sel, s, background, budget, start) -> ClipTrack:
     centre[0], status[0], score[0] = tracker.centre, MEASURED, 1.0
     stopped = None
     for t in range(1, n):
+        _tick(t, n)
         ok, _ = tracker.update_tracker(np.asarray(frames[t]))
         if ok:
             centre[t], status[t], score[t] = tracker.centre, MEASURED, tracker.score()
@@ -167,13 +210,28 @@ def _shrink(image, scale):
                                                                 interpolation=cv2.INTER_AREA)
 
 
-class _Frame:
-    """A frame's feature image, shrunk by `scale` (so whole frames are cheap to search).
-    `background` is the clip's background already shrunk by `scale`."""
+def _small_gray(frame, scale) -> np.ndarray:
+    """The frame in grey, shrunk by `scale`, as float32 (shrunk while 8-bit: several times faster)."""
+    g = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY) if frame.ndim == 3 else frame
+    if g.dtype != np.uint8:
+        return _shrink(np.asarray(g, np.float32), scale)
+    return _shrink(g, scale).astype(np.float32)
 
-    def __init__(self, gray, background, r, s, scale):
+
+class _Frame:
+    """A frame's feature image, shrunk by `scale` (so whole frames are cheap to search), or of a
+    part of it (`box`: x0, y0, x1, y1 in frame pixels). `background` is already shrunk (and cut to
+    the box)."""
+
+    def __init__(self, frame, background, r, s, scale, box=None):
         from experiments.rigid.blobtracker import feature_image
-        gray = _shrink(gray, scale)
+        if box is not None:
+            x0, y0, x1, y1 = box
+            frame = frame[y0:y1, x0:x1]
+        self.origin = (0, 0) if box is None else box[:2]
+        gray = _small_gray(np.asarray(frame), scale)
+        if background is not None and background.shape != gray.shape:
+            background = cv2.resize(background, gray.shape[::-1], interpolation=cv2.INTER_AREA)
         self.scale = scale
         self.image = feature_image(gray, r * scale, s, background)
         self.k = k = max(1, int(round(r * scale)))
@@ -184,7 +242,7 @@ class _Frame:
     def mass_at(self, p) -> float:
         """The feature summed over the ball's disc at frame position p."""
         k, img = self.k, self.image
-        x, y = (int(round((v + 0.5) * self.scale - 0.5)) for v in p)
+        x, y = (int(round((v - o + 0.5) * self.scale - 0.5)) for v, o in zip(p, self.origin))
         if x < k or y < k or x >= img.shape[1] - k or y >= img.shape[0] - k:
             return 0.0
         return float((img[y - k:y + k + 1, x - k:x + k + 1] * self.disc).sum())
@@ -194,7 +252,7 @@ class _Frame:
         patch of the image (noise): rows of (x, y, mass) in frame pixels."""
         image, k = self.image, self.k
         size = 2 * k + 1
-        least = floor * float(np.median(image)) * float(self.disc.sum())
+        least = floor * float(np.median(image[::4, ::4])) * float(self.disc.sum())
         peak = (image >= cv2.dilate(image, np.ones((size, size), np.uint8))) & (image > 0)
         peak[:k], peak[-k:], peak[:, :k], peak[:, -k:] = False, False, False, False
         ys, xs = np.nonzero(peak)
@@ -209,7 +267,7 @@ class _Frame:
                 continue
             out.append((x + float((part * self.xx).sum()) / mass, y + float((part * self.yy).sum()) / mass, mass))
         out = np.array(out).reshape(-1, 3)
-        out[:, :2] = (out[:, :2] + 0.5) / self.scale - 0.5
+        out[:, :2] = (out[:, :2] + 0.5) / self.scale - 0.5 + np.array(self.origin, float)
         return out
 
 
@@ -225,164 +283,284 @@ def _track_offline(frames, sel, values, budget) -> ClipTrack:
     algorithm), so a cover or a look-alike is judged by what comes before and after it. Jumped
     frames are filled in between the path's two sides.
 
+    The path is worked out as the frames are read, so the best path so far can be shown while it
+    runs (track_frames' `partial`); later frames can still change it.
+
     With a background: when the path has the ball resting in one place long enough to be in the
-    background, the background is taken again without it and the clip tracked again."""
+    background (a ghost there would hide it), the background is taken again without it, and the
+    candidates near that place are found again (a second, local pass over the frames)."""
     from experiments.rigid.background import estimate_background, rested, sample_frames
     from experiments.rigid.blobtracker import BlobSettings
     s, L = BlobSettings.from_dict(values), LinkSettings.from_dict(values)
     start = time.process_time()
-    if s.background_mix <= 0:
-        return _offline_pass(frames, sel, s, L, None, budget, start)
-    background = estimate_background(frames)
-    out = _offline_pass(frames, sel, s, L, background, budget, start)
-    if background is None or out.stopped_at is not None:
+    refine = not getattr(_run, "ring", False)   # The ring-centre pass finds the centres otherwise
+    _stage(0.0, 0.05, "Taking the still background")
+    _tick(0, 1)
+    background = estimate_background(frames) if s.background_mix > 0 else None
+    link = _Linker(frames, sel, s, L, background)
+    _stage(0.05, 0.75 if refine else 0.8, "Reading")
+    stopped = link.read_all(budget, start)
+    if background is None or stopped is not None:
+        _stage(0.75, 1.0, "Finding the centres")
+        out = link.result(stopped, start, refine)
+        out.background = background
         return out
+    out = link.result(stopped, start, refine=False)   # Where it rested; centres at the end
     r = _radius(sel)
     picks = sample_frames(len(frames))
     seen = out.status[picks] == MEASURED
-    if not rested(np.where(seen[:, None], out.centre[picks], np.nan), r, s.ghost_share):
+    again = None
+    if rested(np.where(seen[:, None], out.centre[picks], np.nan), r, s.ghost_share):
+        exclude = {int(i): (*out.centre[i] - link.offset, 2 * r) for i, ok in zip(picks, seen) if ok}
+        again = estimate_background(frames, exclude=exclude, base=background)
+    changed = np.abs(again - background) > 2.0 if again is not None else np.zeros(1, bool)  # Where it rested
+    _stage(0.75 if refine else 0.8, 1.0, "Finding the centres")
+    if not changed.any():
+        out = link.result(None, start, refine)
+        out.background = background
         return out
-    exclude = {int(i): (*out.centre[i], 2 * r) for i, ok in zip(picks, seen) if ok}
-    return _offline_pass(frames, sel, s, L, estimate_background(frames, exclude=exclude), budget, start)
+    ys, xs = np.nonzero(changed)
+    pad = int(4 * r + 2 * s.surround * r)
+    h, w = background.shape
+    box = (max(0, xs.min() - pad), max(0, ys.min() - pad), min(w, xs.max() + pad + 1), min(h, ys.max() + pad + 1))
+    _stage(0.75 if refine else 0.8, 0.88 if refine else 1.0, "Second pass, where the ball rested")
+    link.redo_area(again, box)
+    _stage(0.88, 1.0, "Finding the centres")
+    out = link.result(None, start, refine)
+    out.background = again
+    return out
 
 
-def _offline_pass(frames, sel, s, L, background, budget, start) -> ClipTrack:
-    from experiments.rigid.blobtracker import BlobTracker
-    n = len(frames)
-    online = BlobTracker(s)
-    online.background = background
-    first = np.asarray(frames[0])
-    online.initialize_tracker(first, *sel)
-    r = online.r
-    scale = min(1.0, L.scale_radius / r)
-    small_bg = _shrink(background, scale)
-    gray0 = online._gray(first)
-    ref0 = online.ref.copy() if online.ref is not None else None
-    # The ball's blob mass at the scale searched, at the selection
-    begin = np.array(online.centre) - online.offset   # Candidates are blob centres; the offset comes last
-    mass0 = _Frame(gray0, small_bg, r, s, scale).mass_at(begin) or None
+class _Linker:
+    """The whole-clip engine's state: the candidates of every frame read so far, and for each its
+    cheapest way in (the forward pass of the Viterbi algorithm), worked out frame by frame."""
 
-    def look(gray, p):
+    def __init__(self, frames, sel, s, L, background):
+        from experiments.rigid.blobtracker import BlobTracker
+        self.frames, self.s, self.L = frames, s, L
+        self.n = len(frames)
+        online = self.online = BlobTracker(s)
+        online.background = background
+        first = np.asarray(frames[0])
+        online.initialize_tracker(first, *sel)
+        self.r = r = online.r
+        self.scale = min(1.0, L.scale_radius / r)
+        self.small_bg = _shrink(background, self.scale)
+        self.ref0 = online.ref.copy() if online.ref is not None else None
+        self.offset = online.offset.copy()
+        # Candidates are blob centres; the offset is added to the path at the end
+        begin = np.array(online.centre) - online.offset
+        self.mass0 = _Frame(first, self.small_bg, r, s, self.scale).mass_at(begin) or None
+        # Per frame: positions, own cost, likeness, which is the online sighting; then the path's
+        # cost, way in (frame, candidate), velocity and acceleration
+        self.P, self.U, self.M, self.O = [begin[None, :]], [np.zeros(1)], [np.ones(1)], [np.ones(1, bool)]
+        self.C, self.back = [np.zeros(1)], [np.full((1, 2), -1)]
+        self.V, self.A = [np.zeros((1, 2))], [np.zeros((1, 2))]
+        self.alive = [True]
+
+    def _look(self, gray, p):
         """How much the picture at p looks like the ball: the better of frame 0's and the online
         tracker's learned picture."""
-        m = online._match(gray, p) if L.online_ref or ref0 is None else -1.0
-        if ref0 is not None:
-            current, online.ref = online.ref, ref0
+        online = self.online
+        m = online._match(gray, p) if self.L.online_ref or self.ref0 is None else -1.0
+        if self.ref0 is not None:
+            current, online.ref = online.ref, self.ref0
             m = max(m, online._match(gray, p))
             online.ref = current
         return m
 
-    # Per frame: candidate positions, their own cost, their likeness
-    P, U, M, O = [begin[None, :]], [np.zeros(1)], [np.ones(1)], [np.ones(1, bool)]
-    stopped = None
-    for t in range(1, n):
-        frame = np.asarray(frames[t])
+    def _costs(self, gray, pos, mass, bonus):
+        likeness = np.array([self._look(gray, p) for p in pos])
+        cost = self.s.w_unlike * (1.0 - np.clip(likeness, -1, 1)) - np.array(bonus, float).reshape(-1)
+        if self.mass0:
+            ratio = np.maximum(np.array(mass, float), 1e-6) / self.mass0
+            cost = cost + self.s.w_mass * (np.log(ratio) / np.log(3.0)) ** 2
+        return likeness, cost
+
+    def read_all(self, budget, start):
+        """Reads every frame: candidates, then the path's step to them. The frame it was stopped
+        at by the time budget, or None."""
+        partial = getattr(_run, "partial", None)
+        shown = time.perf_counter()
+        # Two stages: a helper thread reads frame t + 1 and finds its peaks (OpenCV work, which
+        # runs alongside) while this one takes frame t's online sighting, likeness and path step
+        pool = ThreadPoolExecutor(1)
+        try:
+            ahead = pool.submit(self._prepare, 1) if self.n > 1 else None
+            for t in range(1, self.n):
+                _tick(t, self.n)
+                frame, found, image = ahead.result()
+                if t + 1 < self.n:
+                    ahead = pool.submit(self._prepare, t + 1)
+                self.add_frame(t, frame, found, image)
+                if partial is not None and time.perf_counter() - shown >= PARTIAL_INTERVAL:
+                    shown = time.perf_counter()
+                    centre, status = self.path(t)
+                    partial(centre, status)
+                if budget and t >= 10 and 1000 * (time.process_time() - start) / t > budget:
+                    return t
+            return None
+        finally:
+            pool.shutdown(wait=True, cancel_futures=True)
+
+    def _prepare(self, t):
+        """Frame t and its strongest peaks (the part of a frame's work that needs no state)."""
+        frame = np.asarray(self.frames[t])
+        image = _Frame(frame, self.small_bg, self.r, self.s, self.scale)
+        return frame, image.peaks(self.L.candidates, self.L.floor), image
+
+    def add_frame(self, t, frame, found, image):
+        s, L, online, r = self.s, self.L, self.online, self.r
         gray = online._gray(frame)
-        image = _Frame(gray, small_bg, r, s, scale)
-        found = image.peaks(L.candidates, L.floor)
         pos, mass, bonus = list(found[:, :2]), list(found[:, 2]), [0.0] * len(found)
         ok = False
         if L.online:
             ok, _ = online.update_tracker(frame)
             if ok:
-                c = np.array(online.centre)
+                c = np.array(online.centre) - online.offset
                 keep = [i for i, p in enumerate(pos) if np.hypot(*(p - c)) > r]  # The sighting replaces peaks on it
                 pos, mass, bonus = [pos[i] for i in keep], [mass[i] for i in keep], [bonus[i] for i in keep]
-                pos.append(c - online.offset)
-                mass.append(image.mass_at(c - online.offset))
+                pos.append(c)
+                mass.append(image.mass_at(c))
                 bonus.append(L.online_bonus)
         is_online = np.zeros(len(pos), bool)
         if ok:
             is_online[-1] = True    # The sighting was added last
-        pos = np.array(pos).reshape(-1, 2)
-        likeness = np.array([look(gray, p) for p in pos])
-        cost = s.w_unlike * (1.0 - np.clip(likeness, -1, 1)) - np.array(bonus)
-        if mass0:
-            ratio = np.maximum(np.array(mass), 1e-6) / mass0
-            cost += s.w_mass * (np.log(ratio) / np.log(3.0)) ** 2
-        P.append(pos), U.append(cost), M.append(likeness), O.append(is_online)
-        if budget and t >= 10 and 1000 * (time.process_time() - start) / t > budget:
-            stopped = t
-            break
-    used = len(P)
+        pos = np.array(pos, float).reshape(-1, 2)
+        likeness, cost = self._costs(gray, pos, mass, bonus)
+        self.P.append(pos), self.U.append(cost), self.M.append(likeness), self.O.append(is_online)
+        self._step(t)
 
-    # The cheapest path (forward pass): for every candidate, its cheapest way in and the motion
-    # state (velocity, acceleration) of that path
-    C = [np.zeros(1)] + [np.full(len(p), np.inf) for p in P[1:]]
-    V = [np.zeros((1, 2))] + [np.zeros((len(p), 2)) for p in P[1:]]
-    A = [np.zeros((1, 2))] + [np.zeros((len(p), 2)) for p in P[1:]]
-    back = [None] + [np.full((len(p), 2), -1) for p in P[1:]]
-    for t in range(1, used):
-        if not len(P[t]):
-            continue
-        frames_from = [u for u in range(max(0, t - L.max_gap), t) if np.isfinite(C[u]).any()]
-        if not frames_from:
-            continue
-        pp = np.concatenate([P[u] for u in frames_from])
-        vv = np.concatenate([V[u] for u in frames_from])
-        aa = np.concatenate([A[u] for u in frames_from])
-        cc = np.concatenate([C[u] for u in frames_from])
-        gap = np.concatenate([np.full(len(P[u]), t - u) for u in frames_from]).astype(float)
-        ids = np.concatenate([np.column_stack([np.full(len(P[u]), u), np.arange(len(P[u]))]) for u in frames_from])
-        pred = pp + vv * gap[:, None] + 0.5 * aa * (gap ** 2)[:, None]
-        jumped = gap - 1
-        tol = r * (L.tol + L.tol_gap * jumped + L.tol_gap2 * jumped ** 2) + L.tol_speed * np.hypot(*vv.T) * gap
-        d = np.hypot(pred[:, None, 0] - P[t][None, :, 0], pred[:, None, 1] - P[t][None, :, 1])
-        step = L.w_motion * (d / tol[:, None]) ** 2
-        # ...or a kick, judged by the distance from the last position only
-        reach = r * L.tol + (np.hypot(*vv.T) + L.kick_reach * r) * gap
-        d0 = np.hypot(pp[:, None, 0] - P[t][None, :, 0], pp[:, None, 1] - P[t][None, :, 1])
-        kick = L.kick + L.w_motion * (d0 / reach[:, None]) ** 2
-        kicked = kick < step
-        step = np.where(kicked, kick, step)
-        step[step > L.max_step] = np.inf
-        total = (cc + L.miss * jumped)[:, None] + step + U[t][None, :]
-        best = np.argmin(total, axis=0)
-        cols = np.arange(len(P[t]))
-        C[t] = total[best, cols]
-        back[t] = ids[best]
-        g = gap[best][:, None]
-        surprise = P[t] - pred[best]
-        smooth_v = vv[best] + aa[best] * g + L.follow_v * surprise / g
-        V[t] = np.where(kicked[best, cols][:, None], (P[t] - pp[best]) / g, smooth_v)
-        A[t] = np.where(kicked[best, cols][:, None], aa[best], aa[best] + L.follow_a * surprise / g ** 2)
+    def _step(self, t):
+        """The cheapest way into each candidate of frame t (from frames up to max_gap back)."""
+        L, r, P = self.L, self.r, self.P
+        k = len(P[t])
+        C, back = np.full(k, np.inf), np.full((k, 2), -1)
+        V, A = np.zeros((k, 2)), np.zeros((k, 2))
+        frames_from = [u for u in range(max(0, t - L.max_gap), t) if self.alive[u]]
+        if k and frames_from:
+            pp = np.concatenate([P[u] for u in frames_from])
+            vv = np.concatenate([self.V[u] for u in frames_from])
+            aa = np.concatenate([self.A[u] for u in frames_from])
+            cc = np.concatenate([self.C[u] for u in frames_from])
+            gap = np.concatenate([np.full(len(P[u]), t - u) for u in frames_from]).astype(float)
+            ids = np.concatenate([np.column_stack([np.full(len(P[u]), u), np.arange(len(P[u]))])
+                                  for u in frames_from])
+            pred = pp + vv * gap[:, None] + 0.5 * aa * (gap ** 2)[:, None]
+            jumped = gap - 1
+            speed = np.hypot(*vv.T)
+            tol = r * (L.tol + L.tol_gap * jumped + L.tol_gap2 * jumped ** 2) + L.tol_speed * speed * gap
+            d = np.hypot(pred[:, None, 0] - P[t][None, :, 0], pred[:, None, 1] - P[t][None, :, 1])
+            step = L.w_motion * (d / tol[:, None]) ** 2
+            # ...or a kick, judged by the distance from the last position only
+            reach = r * L.tol + (speed + L.kick_reach * r) * gap
+            d0 = np.hypot(pp[:, None, 0] - P[t][None, :, 0], pp[:, None, 1] - P[t][None, :, 1])
+            kick = L.kick + L.w_motion * (d0 / reach[:, None]) ** 2
+            kicked = kick < step
+            step = np.where(kicked, kick, step)
+            step[step > L.max_step] = np.inf
+            total = (cc + L.miss * jumped)[:, None] + step + self.U[t][None, :]
+            best = np.argmin(total, axis=0)
+            cols = np.arange(k)
+            C = total[best, cols]
+            back = ids[best]
+            g = gap[best][:, None]
+            surprise = P[t] - pred[best]
+            smooth_v = vv[best] + aa[best] * g + L.follow_v * surprise / g
+            V = np.where(kicked[best, cols][:, None], (P[t] - pp[best]) / g, smooth_v)
+            A = np.where(kicked[best, cols][:, None], aa[best], aa[best] + L.follow_a * surprise / g ** 2)
+        if t < len(self.C):
+            self.C[t], self.back[t], self.V[t], self.A[t], self.alive[t] = C, back, V, A, bool(np.isfinite(C).any())
+        else:
+            self.C.append(C), self.back.append(back), self.V.append(V), self.A.append(A)
+            self.alive.append(bool(np.isfinite(C).any()))
 
-    # The path's end: the cheapest, counting the frames after it as missed
-    ends = [(C[t][k] + L.miss * (n - 1 - t), t, k) for t in range(used) for k in range(len(P[t]))
-            if np.isfinite(C[t][k])]
-    _, t, k = min(ends)
-    chosen = {}
-    while t > 0:
-        chosen[t] = k
-        t, k = back[t][k]
-    chosen[0] = 0
-
-    centre, status, score = np.zeros((n, 2)), np.zeros(n, int), np.zeros(n)
-    times = sorted(chosen)
-    for t in times:
-        k = chosen[t]
-        centre[t], status[t], score[t] = P[t][k], MEASURED, float(np.clip(M[t][k], 0, 1))
-        if t and not O[t][k]:
-            # A peak of the shrunk frame: its blob at full size, for a sub-pixel centre
-            found = online._blobs(online._gray(np.asarray(frames[t])), P[t][k], r)
+    def redo_area(self, background, box):
+        """The second pass: with a new background, the candidates inside `box` (x0, y0, x1, y1) are
+        found again on every frame (those outside, and the online sightings, are kept), and the
+        path is worked out again."""
+        partial = getattr(_run, "partial", None)
+        x0, y0, x1, y1 = box
+        cut = background[y0:y1, x0:x1]
+        small = _shrink(cut, self.scale)
+        self.online.background = background
+        shown = time.perf_counter()
+        for t in range(1, len(self.P)):
+            _tick(t, self.n)
+            frame = np.asarray(self.frames[t])
+            pos, keep = self.P[t], ~self.O[t]
+            inside = keep & (pos[:, 0] >= x0) & (pos[:, 0] < x1) & (pos[:, 1] >= y0) & (pos[:, 1] < y1)
+            image = _Frame(frame, small, self.r, self.s, self.scale, box=box)
+            found = image.peaks(self.L.candidates, self.L.floor)
             if len(found):
-                j = int(np.argmin(np.hypot(*(found[:, :2] - P[t][k]).T)))
-                if np.hypot(*(found[j, :2] - P[t][k])) <= r:
-                    centre[t] = found[j, :2]
-    status[0], score[0] = MEASURED, 1.0
-    for a, b in zip(times, times[1:]):   # Jumped frames: a cubic between the two sides' motion
-        if b - a > 1:
-            va = V[a][chosen[a]]
-            vb = V[b][chosen[b]]
-            for t in range(a + 1, b):
-                centre[t] = _hermite(centre[a], va, centre[b], vb, (t - a) / (b - a), b - a)
-                status[t] = FILLED
-    last = times[-1]
-    centre[last + 1:] = centre[last]
-    centre += online.offset
-    ms = 1000 * (time.process_time() - start) / (stopped or n - 1)
-    LAST_RUN.update(P=P, U=U, M=M, C=C, chosen=chosen)  # For inspecting a run
-    return ClipTrack(centre, status, score, ms, stopped)
+                gray = self.online._gray(frame)
+                likeness, cost = self._costs(gray, found[:, :2], found[:, 2], np.zeros(len(found)))
+            else:
+                likeness, cost = np.zeros(0), np.zeros(0)
+            stay = ~inside
+            self.P[t] = np.concatenate([pos[stay], found[:, :2]])
+            self.U[t] = np.concatenate([self.U[t][stay], cost])
+            self.M[t] = np.concatenate([self.M[t][stay], likeness])
+            self.O[t] = np.concatenate([self.O[t][stay], np.zeros(len(found), bool)])
+            self._step(t)
+            if partial is not None and time.perf_counter() - shown >= PARTIAL_INTERVAL:
+                shown = time.perf_counter()
+                partial(*self.path(t))
+
+    def path(self, upto, refine=False):
+        """The cheapest path over frames 0..upto (frames after it count as missed): (centre,
+        status) for all n frames, the offset added. With `refine`, peaks of the shrunk frames are
+        found again at full size (sub-pixel; it reads those frames again)."""
+        L, n = self.L, self.n
+        best = None
+        for t in range(upto + 1):
+            if self.alive[t]:
+                k = int(np.argmin(self.C[t]))
+                cost = self.C[t][k] + L.miss * (n - 1 - t)
+                if best is None or cost < best[0]:
+                    best = (cost, t, k)
+        _, t, k = best
+        chosen = {}
+        while t > 0:
+            chosen[t] = k
+            t, k = self.back[t][k]
+        chosen[0] = 0
+        centre, status = np.zeros((n, 2)), np.zeros(n, int)
+        self.score = np.zeros(n)
+        times = sorted(chosen)
+        for i, t in enumerate(times):
+            k = chosen[t]
+            if refine:
+                _tick(i, len(times))
+            centre[t], status[t] = self.P[t][k], MEASURED
+            self.score[t] = float(np.clip(self.M[t][k], 0, 1))
+            if refine and t and not self.O[t][k]:
+                found = self.online._blobs(self.online._gray(np.asarray(self.frames[t])), self.P[t][k], self.r)
+                if len(found):
+                    j = int(np.argmin(np.hypot(*(found[:, :2] - self.P[t][k]).T)))
+                    if np.hypot(*(found[j, :2] - self.P[t][k])) <= self.r:
+                        centre[t] = found[j, :2]
+        self.score[0] = 1.0
+        for a, b in zip(times, times[1:]):   # Jumped frames: a cubic between the two sides' motion
+            if b - a > 1:
+                va, vb = self.V[a][chosen[a]], self.V[b][chosen[b]]
+                for t in range(a + 1, b):
+                    centre[t] = _hermite(centre[a], va, centre[b], vb, (t - a) / (b - a), b - a)
+                    status[t] = FILLED
+        last = times[-1]
+        centre[last + 1:] = centre[last]
+        centre += self.offset
+        self.chosen = chosen
+        return centre, status
+
+    def result(self, stopped, start, refine=True) -> ClipTrack:
+        centre, status = self.path(len(self.P) - 1, refine=refine)
+        ms = 1000 * (time.process_time() - start) / (stopped or self.n - 1)
+        LAST_RUN.update(P=self.P, U=self.U, M=self.M, C=self.C, chosen=self.chosen)  # For inspecting a run
+        return ClipTrack(centre, status, self.score, ms, stopped)
+
+
+PARTIAL_INTERVAL = 0.3   # Seconds between the best paths so far sent while reading (track_frames' partial)
 
 
 LAST_RUN: dict = {}
