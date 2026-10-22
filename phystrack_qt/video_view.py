@@ -6,22 +6,34 @@ transform does all zooming and panning on the GPU. Overlays are children of the 
 they stay on the same frame pixels at any zoom without coordinate code of their own.
 """
 
+import os
+
 import numpy as np
-from PySide6.QtCore import QEvent, QPointF, Qt, Signal
-from PySide6.QtGui import QColor, QImage, QPainter, QPixmap
+from PySide6.QtCore import QEvent, QPointF, QRectF, Qt, Signal
+from PySide6.QtGui import QColor, QImage, QPainter, QPen, QPixmap
 from PySide6.QtOpenGLWidgets import QOpenGLWidget
-from PySide6.QtWidgets import QGraphicsPixmapItem, QGraphicsScene, QGraphicsView
+from PySide6.QtWidgets import (QGraphicsPixmapItem, QGraphicsRectItem, QGraphicsScene,
+                               QGraphicsView, QWidget)
 
 MAX_ZOOM = 8.0  # Times the fitted size, as in the Tk app
 
 
+# "cpu" draws without OpenGL. Tests use it: Qt cannot capture an OpenGL view on macOS (grab() gives
+# a black or garbage picture), and the offscreen platform (no window) has no OpenGL at all.
+VIEWPORT = os.environ.get("PHYSTRACK_QT_VIEWPORT", "gl")
+
+TOOL_NONE, TOOL_CLICK, TOOL_BOX = "none", "click", "box"
+
+
 class VideoView(QGraphicsView):
-    clicked = Signal(QPointF)     # A click on the picture while a tool wants one, in frame pixels
+    clicked = Signal(QPointF)     # A click on the picture for TOOL_CLICK, in frame pixels
+    box_drawn = Signal(QRectF)    # A box dragged out for TOOL_BOX, in frame pixels
     zoom_changed = Signal(float)  # Zoom relative to the fitted size
 
     def __init__(self) -> None:
         super().__init__()
-        self.setViewport(QOpenGLWidget())  # GPU drawing: about 9 ms a frame, vs about 26 ms on CPU
+        # GPU drawing: about 9 ms a frame, vs about 26 ms on CPU
+        self.setViewport(QWidget() if VIEWPORT == "cpu" else QOpenGLWidget())
         self.setScene(QGraphicsScene(self))
         self.setBackgroundBrush(QColor("#4d535c"))
         self.setRenderHint(QPainter.RenderHint.Antialiasing)
@@ -33,7 +45,9 @@ class VideoView(QGraphicsView):
         self.picture.setShapeMode(QGraphicsPixmapItem.ShapeMode.BoundingRectShape)
         self.scene().addItem(self.picture)
         self._fitted = True    # Follows the window's size until the user zooms
-        self.wants_click = False
+        self.tool = TOOL_NONE
+        self._box_start: QPointF | None = None
+        self._rubber: QGraphicsRectItem | None = None
 
     # --- Picture ---------------------------------------------------------------------------------
     def show_frame(self, frame: np.ndarray) -> None:
@@ -105,18 +119,50 @@ class VideoView(QGraphicsView):
         else:
             super().mouseDoubleClickEvent(event)
 
-    # --- Clicks for tools ------------------------------------------------------------------------
-    def set_wants_click(self, on: bool) -> None:
-        """A tool waits for a click on the picture: no hand-drag panning meanwhile."""
-        self.wants_click = on
+    # --- Tools: a click, or a box dragged out --------------------------------------------------
+    def set_tool(self, tool: str) -> None:
+        """While a tool waits for the mouse, dragging does not pan the picture."""
+        self.tool = tool
+        on = tool != TOOL_NONE
         self.setDragMode(QGraphicsView.DragMode.NoDrag if on else
                          QGraphicsView.DragMode.ScrollHandDrag)
         self.viewport().setCursor(Qt.CursorShape.CrossCursor if on else Qt.CursorShape.OpenHandCursor)
 
+    def _frame_point(self, event) -> QPointF:
+        return self.picture.mapFromScene(self.mapToScene(event.position().toPoint()))
+
     def mousePressEvent(self, event) -> None:
-        if self.wants_click and event.button() == Qt.MouseButton.LeftButton:
-            point = self.picture.mapFromScene(self.mapToScene(event.position().toPoint()))
+        if self.tool != TOOL_NONE and event.button() == Qt.MouseButton.LeftButton:
+            point = self._frame_point(event)
             if self.picture.contains(point):
-                self.clicked.emit(point)
+                if self.tool == TOOL_CLICK:
+                    self.clicked.emit(point)
+                else:
+                    self._box_start = point
+                    self._rubber = QGraphicsRectItem(QRectF(point, point), self.picture)
+                    pen = QPen(QColor("#ffd400"), 2, Qt.PenStyle.DashLine)
+                    pen.setCosmetic(True)
+                    self._rubber.setPen(pen)
                 return
         super().mousePressEvent(event)
+
+    def mouseMoveEvent(self, event) -> None:
+        if self._rubber is not None:
+            self._rubber.setRect(self._box_rect(event))
+            return
+        super().mouseMoveEvent(event)
+
+    def mouseReleaseEvent(self, event) -> None:
+        if self._rubber is not None:
+            rect = self._box_rect(event)
+            self.scene().removeItem(self._rubber)
+            self._rubber = self._box_start = None
+            if rect.width() >= 4 and rect.height() >= 4:  # A click is not a box
+                self.box_drawn.emit(rect)
+            return
+        super().mouseReleaseEvent(event)
+
+    def _box_rect(self, event) -> QRectF:
+        """The dragged box, kept inside the picture."""
+        rect = QRectF(self._box_start, self._frame_point(event)).normalized()
+        return rect.intersected(self.picture.boundingRect())
