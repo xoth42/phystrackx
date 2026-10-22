@@ -26,6 +26,9 @@ import numpy as np
 OBJECT_DELTA = 8.0   # Lab distance from the local background that counts as object
 MIN_LENGTH = 20.0    # Shorter rulers, and objects shorter than this, are too small to snap
 PASSES = 3           # Turns: the first along the ruler, then along the object's edge
+TAPE_GAP = 31        # Rows: gaps this short in the object (pale tape across it) are bridged
+EDGE_TOLERANCE = 2.0 # Pixels: edge rows further than this from the fitted edge are left out
+EDGE_SEARCH = 6      # Pixels either side of the mask's edge that the sharpest colour step is sought in
 
 
 def snap_ruler(image, p1, p2, side: str = "left", half_width: float = 15.0, segmenter=None):
@@ -146,6 +149,7 @@ def _object_rows(frame, size: int, half_width: float, outline=None):
     Returns (rows, left, right) as arrays, one entry per row of the object.
     """
     cx = size / 2
+    distance = None
     if outline is not None:
         mask = outline.astype(np.uint8)
     else:
@@ -163,6 +167,9 @@ def _object_rows(frame, size: int, half_width: float, outline=None):
         mask[:, band] = (distance[:, band] > OBJECT_DELTA).astype(np.uint8)
         mask = cv2.morphologyEx(mask, cv2.MORPH_OPEN, np.ones((3, 3), np.uint8))
         mask = cv2.morphologyEx(mask, cv2.MORPH_CLOSE, np.ones((7, 7), np.uint8))
+        # Pale tape across the object has no colour, so it cuts the object in two. A tall closing
+        # joins the pieces across it, so the ends are the object's ends and not the tape's.
+        mask = cv2.morphologyEx(mask, cv2.MORPH_CLOSE, np.ones((TAPE_GAP, 1), np.uint8))
 
     # The object: the piece the ruler's centre column runs through. Closing joins the pieces
     # that a shadow or a mark has cut it into.
@@ -179,19 +186,61 @@ def _object_rows(frame, size: int, half_width: float, outline=None):
     right = np.array([xs[ys == r].max() for r in rows], dtype=float)
     if rows[-1] - rows[0] < MIN_LENGTH:
         raise ValueError("The object under the ruler is too small to snap to.")
+    if distance is not None:  # The mask's edges sit a pixel or two off the true edge (see _refine_edges)
+        left = _refine_edges(distance, rows, left)
+        right = _refine_edges(distance, rows, right)
     return rows.astype(float), left, right
+
+
+def _refine_edges(distance, rows, edge):
+    """
+    Moves each row's edge to the sharpest step in colour near the mask's edge, to a fraction of a
+    pixel. The mask's edge is where the colour is just past the threshold, which lies outside the
+    object's real edge, and further out where a shadow or pale tape touches it. The object's own
+    edge is the strongest step, so it wins over those.
+    """
+    refined = edge.astype(float).copy()
+    cols = distance.shape[1]
+    for i, (r, e) in enumerate(zip(rows.astype(int), edge)):
+        c0, c1 = int(round(e)) - EDGE_SEARCH, int(round(e)) + EDGE_SEARCH
+        if c0 < 1 or c1 > cols - 2:
+            continue
+        seg = distance[r, c0 - 1:c1 + 2]
+        grad = np.abs((seg[2:] - seg[:-2]) / 2.0)  # Central difference at each column c0..c1
+        k = int(np.argmax(grad))
+        offset = 0.0
+        if 0 < k < len(grad) - 1:  # Parabola through the peak, for a fraction of a pixel
+            denom = grad[k - 1] - 2 * grad[k] + grad[k + 1]
+            if denom != 0:
+                offset = 0.5 * (grad[k - 1] - grad[k + 1]) / denom
+        refined[i] = c0 + k + offset
+    return refined
 
 
 def _ends(rows, edge):
     """
     The two ends of an object's edge: the edge is fitted as a line through its middle (the ends
     of an object are often rounded), then taken at the object's first and last rows.
+
+    The fit leaves out rows that sit off the line (a pale tape or a shadow beside the object pulls
+    the edge sideways there), and refits, until the rows left agree with the line.
     """
     top, bottom = rows.min(), rows.max()
     span = bottom - top
     inner = (rows > top + 0.05 * span) & (rows < bottom - 0.05 * span)
     if inner.sum() >= 2:
-        slope, offset = np.polyfit(rows[inner], edge[inner], 1)
+        r, e = rows[inner], edge[inner]
+        keep = np.ones(len(r), dtype=bool)
+        slope, offset = np.polyfit(r, e, 1)
+        for _ in range(10):
+            resid = e - (offset + slope * r)
+            spread = 1.4826 * np.median(np.abs(resid[keep] - np.median(resid[keep])))
+            limit = max(EDGE_TOLERANCE, 3.0 * spread)
+            new_keep = np.abs(resid) <= limit
+            if new_keep.sum() < 2 or np.array_equal(new_keep, keep):
+                break
+            keep = new_keep
+            slope, offset = np.polyfit(r[keep], e[keep], 1)
     else:
         slope, offset = 0.0, float(edge.mean())
     return (offset + slope * top, top), (offset + slope * bottom, bottom)

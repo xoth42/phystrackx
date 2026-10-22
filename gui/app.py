@@ -91,6 +91,8 @@ class App:
             button.pack(padx=self.padx/4, pady=self.pady/4)
         
         self.logger.info("Toolbar buttons created.")
+        self.sidebar_canvas = self.scrollframe._parent_canvas  # The canvas that customtkinter scrolls
+        self._bind_sidebar_wheel()
 
         # Video panel layout
         self.vidframe = ctk.CTkFrame(self.root, width=self.vwidth, height=self.theight,
@@ -110,6 +112,49 @@ class App:
                          self.btnlist, self.btnlist["axis"])
         
         self.logger.info("Axes component initialized.")
+
+    SIDEBAR_WHEEL_PIXELS = 40  # Pixels moved per mouse-wheel notch, as in the video view
+
+    def _bind_sidebar_wheel(self) -> None:
+        """Scrolls the sidebar list for gestures made over it. customtkinter only scrolls when the
+        focused widget is in the list, and it ignores trackpad gestures, so its handler is replaced.
+        The video view's bindings use their own tag and are left alone."""
+        self.scrollframe.unbind_all("<MouseWheel>")
+        self.root.bind_all("<MouseWheel>", self._on_sidebar_wheel, add="+")
+        self.root.bind_all("<TouchpadScroll>", self._on_sidebar_touchpad, add="+")
+
+    def _on_sidebar_wheel(self, event) -> None:
+        if self._over_sidebar(event):
+            # Windows sends 120 per notch; macOS mice send small counts. Both become notches.
+            notches = event.delta / 120 if abs(event.delta) >= 120 else float(event.delta)
+            self._scroll_sidebar(notches * self.SIDEBAR_WHEEL_PIXELS)
+
+    def _on_sidebar_touchpad(self, event) -> None:
+        """Unpacks the scroll as the video view does: x in the high 16 bits, y in the low 16."""
+        if self._over_sidebar(event):
+            low = int(event.delta) & 0xFFFF
+            self._scroll_sidebar(low if low < 0x8000 else low - 0x10000)
+
+    def _over_sidebar(self, event) -> bool:
+        """True when the pointer is over the sidebar, whichever widget has the focus."""
+        try:
+            widget = self.root.winfo_containing(event.x_root, event.y_root)
+        except KeyError:  # A widget this app does not own
+            return False
+        sidebar = self.scrollframe._parent_frame
+        while widget is not None:
+            if widget is sidebar:
+                return True
+            widget = widget.master
+        return False
+
+    def _scroll_sidebar(self, dy: float) -> None:
+        """Moves the list by dy pixels. Positive moves the content down, as in the video view."""
+        bbox = self.sidebar_canvas.bbox("all")
+        if bbox is None or bbox[3] - bbox[1] <= self.sidebar_canvas.winfo_height():
+            return
+        top, _ = self.sidebar_canvas.yview()
+        self.sidebar_canvas.yview_moveto(top - dy / (bbox[3] - bbox[1]))
 
     def openvideo(self) -> None:
         """Open a video file using file dialog."""

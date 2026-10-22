@@ -49,6 +49,12 @@ class BlobSettings:
     feature: str = "contrast"         # The feature image: a name in FEATURES
     surround: float = 1.5             # Size of the surroundings the ball is compared with
     spread: float = 0.5               # Blur that makes the whole ball one peak
+    # The still background (background.py; used when the tracker is given one): the feature image
+    # is this much of the feature of (frame - background), and the rest the frame's own, so static
+    # clutter fades. 0 ignores the background; 1 sees only what differs from it
+    background_mix: float = 0.0
+    ghost_share: float = 0.35         # When a first track has the ball in one place in this share of the
+                                      # sampled frames, the background is taken again without it (cliptrack)
     # Likeness: normalised correlation of the inside of the ball
     patch: float = 0.7                # Half-size of the ball's picture
     flat_ref: float = 4.0             # A picture flatter than this (grey-level spread) also takes the edge
@@ -87,6 +93,11 @@ class BlobSettings:
     learn_first: int = 3              # ...except on the first few sightings
     learn_picture: float = 0.3        # How fast the picture and
     learn_mass: float = 0.2           # the mass follow the latest sighting
+    # Where the centre is: the blob's centre is off the ball's when the ball is lit from one side
+    # (a shiny ball's bright top pulls it up). With this, the offset between the selection's
+    # centre and the blob's on the first frame is kept and added to every position (up to half a
+    # radius; for fixed lighting)
+    selection_offset: bool = False
 
     def to_dict(self) -> dict:
         return asdict(self)
@@ -113,6 +124,20 @@ def _dog_feature(win, r, s):
 
 
 FEATURES = {"contrast": _contrast_feature, "dog": _dog_feature}
+
+
+def feature_image(win, r, s, background=None):
+    """The feature image (FEATURES[s.feature]) of a grey float32 picture, for a ball of radius r.
+    With the still `background` (same size), it is s.background_mix of the feature of what differs
+    from the background (scaled to the picture's brightness first, for flicker), and the rest the
+    picture's own."""
+    feature, mix = FEATURES[s.feature], s.background_mix
+    if background is None or mix <= 0:
+        return feature(win, r, s)
+    moving = feature(win - background * (float(win.mean()) / max(float(background.mean()), 1e-3)), r, s)
+    if mix >= 1:
+        return moving
+    return (1 - mix) * feature(win, r, s) + mix * moving
 
 
 # Motion models: (F, Q) for one frame step, the state is (x, y, vx, vy, ax, ay)
@@ -192,21 +217,41 @@ def locate_direct(image: np.ndarray, diameter: int, percentile: float = 64.0,
     return found
 
 
+def outline_circle(outline) -> tuple[np.ndarray, float]:
+    """The centre (centroid) and radius (of the circle with the same area) of an outline: a polygon
+    of (x, y) points, or a boolean mask."""
+    outline = np.asarray(outline)
+    if outline.dtype == bool:
+        ys, xs = np.nonzero(outline)
+        return np.array([xs.mean(), ys.mean()]), float(np.sqrt(len(xs) / np.pi))
+    m = cv2.moments(outline.astype(np.float32).reshape(-1, 1, 2))
+    return np.array([m["m10"] / m["m00"], m["m01"] / m["m00"]]), float(np.sqrt(abs(m["m00"]) / np.pi))
+
+
 # -------------------------------------------------------------------------------------------------
 class BlobTracker:
     def __init__(self, settings: BlobSettings | None = None) -> None:
         self.s = settings or BlobSettings()
         self.feature = FEATURES[self.s.feature]
         self.centre = None            # Sub-pixel centre (x, y) of the last update
+        self.offset = np.zeros(2)     # Added to the blob's centre (selection_offset)
+        self.background = None        # The clip's still background (grey float32), set before initialize_tracker
         self._score = 0.0
 
-    def initialize_tracker(self, frame, rect: PixelRect) -> None:
+    def initialize_tracker(self, frame, rect: PixelRect, outline=None) -> None:
+        """Starts on the object in `rect` on `frame`. With an `outline` of it (a polygon of (x, y)
+        points or a boolean mask the frame's size, as an automatic selection gives), its centroid
+        is the centre and its area gives the radius."""
         s = self.s
-        self.r = max(rect.width, rect.height) / 2.0
+        if outline is not None:
+            centre, self.r = outline_circle(outline)
+        else:
+            self.r = max(rect.width, rect.height) / 2.0
+            centre = np.array([rect.xmin + rect.width / 2.0, rect.ymin + rect.height / 2.0])
         self.d = int(2 * round(self.r) + 1) | 1                # trackpy wants an odd diameter
         self.half = max(2, int(s.patch * self.r))
         self.base = max(s.base * self.r, s.base_min)
-        centre = np.array([rect.xmin + rect.width / 2.0, rect.ymin + rect.height / 2.0])
+        selected = centre.copy()
         gray = self._gray(frame)
         self.ref = self._patch(gray, centre)
         if self.ref is not None and float(self.ref.std()) < s.flat_ref:
@@ -226,7 +271,10 @@ class BlobTracker:
         self.P = np.diag([(s.start_pos * self.r) ** 2] * 2 + [(s.start_vel * self.r) ** 2] * 2
                          + [s.start_acc ** 2] * 2)
         self.seen, self.missing = centre.copy(), 0
-        self.centre = (float(centre[0]), float(centre[1]))
+        self.offset = np.zeros(2)
+        if s.selection_offset and np.hypot(*(selected - centre)) <= 0.5 * self.r:
+            self.offset = selected - centre
+        self.centre = (float(centre[0] + self.offset[0]), float(centre[1] + self.offset[1]))
         self._score = 1.0
 
     def score(self) -> float:
@@ -257,7 +305,7 @@ class BlobTracker:
         if found is None:
             self.missing += 1
             self._score = 0.0
-            self.centre = (float(pred[0]), float(pred[1]))
+            self.centre = (float(pred[0] + self.offset[0]), float(pred[1] + self.offset[1]))
             return False, PixelRect(0, 0, 0, 0)
         best, match, mass = found
         if strong and np.hypot(*(best - pred)) > reach:
@@ -286,7 +334,7 @@ class BlobTracker:
         else:
             self.missing += 1
         self._score = match
-        self.centre = (float(best[0]), float(best[1]))
+        self.centre = (float(best[0] + self.offset[0]), float(best[1] + self.offset[1]))
         r = int(round(self.r))
         return True, PixelRect(int(round(best[0])) - r, int(round(best[1])) - r, 2 * r, 2 * r)
 
@@ -347,7 +395,8 @@ class BlobTracker:
         x1, y1 = min(w, int(centre[0]) + pad + 1), min(h, int(centre[1]) + pad + 1)
         if x1 - x0 < 2 * self.d or y1 - y0 < 2 * self.d:
             return None, x0, y0
-        return self.feature(gray[y0:y1, x0:x1], self.r, self.s), x0, y0
+        bg = None if self.background is None else self.background[y0:y1, x0:x1]
+        return feature_image(gray[y0:y1, x0:x1], self.r, self.s, bg), x0, y0
 
     def _blobs(self, gray, centre, reach) -> np.ndarray:
         """Ball-sized blobs within `reach` of `centre`, as rows of (x, y, mass) in frame pixels."""

@@ -17,6 +17,7 @@ THESE ARE EXPECTED TO FAIL TODAY. They say what good would look like for dirty a
 footage; the failures are the list of what to work on. No window is needed.
 """
 
+import os
 from dataclasses import dataclass, field
 from typing import Callable
 
@@ -27,7 +28,7 @@ from tests import harness as h
 h.setup_env()
 
 from tests.test_tracker_scenarios import (  # noqa: E402
-    N, W, H, Thing, bg_paper, bg_white, draw_ball, path_bounce, path_lissajous, trace)
+    N, W, H, Jitter, Thing, bg_paper, bg_white, draw_ball, path_bounce, path_lissajous, trace)
 
 HAND = (26, 26, 30)    # A black sleeve and glove, as in the real footage
 RECOVERY_LIMIT = 6   # Frames the tracker may take to be back on the ball after it is uncovered
@@ -306,6 +307,7 @@ class Rough:
     seed: int = 1
     chrome: bool = True              # A polished steel ball (otherwise a plain coloured one)
     known_weak: bool = False         # Not used here; kept so reports can treat all scenarios alike
+    backdrop: Callable | None = None  # A moving background: frame t -> picture (instead of `background`)
 
     def __post_init__(self):
         self._bg = self.background(np.random.default_rng(self.seed))
@@ -327,7 +329,7 @@ class Rough:
 
     def frame(self, t):
         rng = np.random.default_rng(self.seed * 100003 + int(t))
-        img = self._bg.copy()
+        img = (self.backdrop(t) if self.backdrop is not None else self._bg).copy()
         for thing in self.things:
             if not thing.front:
                 thing.draw(img, t)
@@ -395,82 +397,145 @@ def _bubbles(n, rng):
             for _ in range(n)]
 
 
-def build_scenarios() -> list:
-    rng = np.random.default_rng(11)
-    tube_drop = from_rest(path_tube_drop(), hold=20, ramp=6)
+def build_scenarios(draw: int = 0) -> list:
+    """The scenarios; `draw` above 0 gives a random variation of each (see Jitter): the ball's size,
+    path and release, where the covers cross, the dirt on the lens, noise and compression."""
+    j = Jitter(draw)
+    rng = np.random.default_rng(j.seed(11))
+    tube_drop = from_rest(path_tube_drop(x=j.shift(320.0, 25), top=j.shift(70.0, 15), rest=j.shift(240.0, 50),
+                                         period=j.scale(70.0, 0.2), decay=j.scale(0.018, 0.3)),
+                          hold=j.int(20, 6), ramp=j.int(6, 2))
     # Cover scenarios use a straight path at constant speed once released, so that how long a cover
     # hides the ball is set by the cover's own speed and not by a curving path
-    straight = from_rest(path_bounce(6.0, start=(110.0, 80.0), angle_deg=33.0, r=10), hold=20, ramp=15)
+    def straight(hold=20, ramp=15):
+        return from_rest(path_bounce(j.scale(6.0, 0.2), start=j.shift((110.0, 80.0), 25),
+                                     angle_deg=j.shift(33.0, 10), r=10), hold=hold, ramp=ramp)
     slab = (110, 112, 120)
     # How dirty: the same lens in the tube scenarios that say so (a new Lens each, same dirt)
     greasy = dict(smudges=5, smears=4, specks=70, fog=0.10, defocus=1.4)
     filthy = dict(smudges=7, smears=5, specks=130, droplets=8, scratches=14, fog=0.30, glare=True,
                   vignette=0.6, defocus=2.0)
-    tube = dict(background=bg_tube, path=tube_drop, hand=True, blur=5)
+    tube = dict(background=bg_tube, path=tube_drop, hand=True, blur=5, seed=j.seed(1))
+    wall = dict(background=bg_paper, path=straight(), seed=j.seed(1))
+    lens, size, q = (lambda k, **kw: Lens(j.seed(k), **kw)), (lambda v: j.scale(v, 0.15)), (lambda v: j.int(v, 8))
+    noise = lambda v: j.scale(v, 0.3)
+    cross = lambda t: j.shift(t, 4)
     return [
         # --- muddied footage: a steel ball released by a black-gloved hand into a glass tube ---
-        Rough(name="glass tube, clean lens", tier="muddy", radius=7, body=(0,) * 3, rim=(0,) * 3,
+        Rough(name="glass tube, clean lens", tier="muddy", radius=size(7), body=(0,) * 3, rim=(0,) * 3,
               blurb="A small polished steel ball held by a black-gloved hand at the top of a glass tube, then released. The tube bends and reflects what is behind it, with a clamp stand and a ruler beside it. The lens is clean.",
-              noise=2.0, jpeg=60, **tube),
+              noise=noise(2.0), jpeg=q(60), **tube),
         Rough(name="white wall, silver ball, dirty lens", tier="muddy", background=bg_white,
-              path=from_rest(path_lissajous(1.2), hold=20, ramp=15), radius=8, body=(0,) * 3, rim=(0,) * 3,
+              path=from_rest(path_lissajous(j.scale(1.2, 0.2), phase=j.shift((0.1, 0.35), 0.2)), hold=j.int(20, 6), ramp=15),
+              radius=size(8), body=(0,) * 3, rim=(0,) * 3, seed=j.seed(1),
               blurb="A steel ball on a white wall (so its edge is bright against the wall) through a greasy, dusty lens.",
-              lens=Lens(21, **greasy), blur=3, noise=4.0, jpeg=35),
-        Rough(name="glass tube, greasy lens", tier="muddy", radius=7, body=(0,) * 3, rim=(0,) * 3,
+              lens=lens(21, **greasy), blur=3, noise=noise(4.0), jpeg=q(35)),
+        Rough(name="glass tube, greasy lens", tier="muddy", radius=size(7), body=(0,) * 3, rim=(0,) * 3,
               blurb="The same tube through a lens with grease smears, finger streaks, dust and a little fog.",
-              lens=Lens(22, **greasy), noise=3.0, jpeg=35, **tube),
-        Rough(name="glass tube, water drops and dust", tier="muddy", radius=7, body=(0,) * 3, rim=(0,) * 3,
+              lens=lens(22, **greasy), noise=noise(3.0), jpeg=q(35), **tube),
+        Rough(name="glass tube, water drops and dust", tier="muddy", radius=size(7), body=(0,) * 3, rim=(0,) * 3,
               blurb="Nine water drops on the lens bend the picture into small inverted circles, and the ball falls behind some of them. Dust everywhere.",
-              lens=Lens(23, smudges=2, specks=120, droplets=9, defocus=1.2), noise=3.0, jpeg=35, **tube),
-        Rough(name="glass tube, glare, fog and scratches", tier="muddy", radius=7, body=(0,) * 3, rim=(0,) * 3,
+              lens=lens(23, smudges=2, specks=120, droplets=9, defocus=1.2), noise=noise(3.0), jpeg=q(35), **tube),
+        Rough(name="glass tube, glare, fog and scratches", tier="muddy", radius=size(7), body=(0,) * 3, rim=(0,) * 3,
               blurb="A bright light beside the scene washes out one corner, fog on the glass cuts the contrast, and scratches catch the light. Heavy compression and exposure flicker.",
-              lens=Lens(24, smudges=3, scratches=16, glare=True, vignette=0.6, fog=0.30, defocus=1.4),
-              noise=5.0, flicker=10.0, jpeg=22, **tube),
-        Rough(name="glass tube, filthy lens", tier="muddy", radius=7, body=(0,) * 3, rim=(0,) * 3,
+              lens=lens(24, smudges=3, scratches=16, glare=True, vignette=0.6, fog=0.30, defocus=1.4),
+              noise=noise(5.0), flicker=10.0, jpeg=q(22), **tube),
+        Rough(name="glass tube, filthy lens", tier="muddy", radius=size(7), body=(0,) * 3, rim=(0,) * 3,
               blurb="Everything at once: grease and finger streaks, dust, water drops, scratches, fog, glare, defocus, heavy compression, noise and flicker, with bubbles drifting in the tube.",
-              lens=Lens(25, **filthy), things=_bubbles(5, rng), noise=6.0, flicker=10.0, jpeg=20, **tube),
-        Rough(name="tiny steel ball, greasy lens", tier="muddy", radius=4, body=(0,) * 3, rim=(0,) * 3,
+              lens=lens(25, **filthy), things=_bubbles(5, rng), noise=noise(6.0), flicker=10.0, jpeg=q(20), **tube),
+        Rough(name="tiny steel ball, greasy lens", tier="muddy", radius=j.scale(4, 0.1), body=(0,) * 3, rim=(0,) * 3,
               blurb="The ball is only 4 px in radius, as it is when the camera is far from the tube, behind a greasy lens.",
-              lens=Lens(27, **greasy), noise=4.0, jpeg=30, **tube),
-        Rough(name="tiny steel ball, filthy lens", tier="muddy", radius=4, body=(0,) * 3, rim=(0,) * 3,
+              lens=lens(27, **greasy), noise=noise(4.0), jpeg=q(30), **tube),
+        Rough(name="tiny steel ball, filthy lens", tier="muddy", radius=j.scale(4, 0.1), body=(0,) * 3, rim=(0,) * 3,
               blurb="A 4 px steel ball behind the filthy lens, with bubbles of about its size: the hardest footage here.",
-              lens=Lens(29, **filthy), things=_bubbles(6, rng), noise=6.0, flicker=10.0, jpeg=20, **tube),
+              lens=lens(29, **filthy), things=_bubbles(6, rng), noise=noise(6.0), flicker=10.0, jpeg=q(20), **tube),
         # --- covered balls: a steel ball on a wall, through a mildly dirty lens ---
-        Rough(name="half covered for a moment", tier="occluded", background=bg_paper, path=straight,
-              radius=8, body=(0,) * 3, rim=(0,) * 3,
+        Rough(name="half covered for a moment", tier="occluded", radius=size(8), body=(0,) * 3, rim=(0,) * 3,
               blurb="A grey slab slides across the ball's path and hides about half of it for several frames.",
-              covers=[Cover("rect", 16, slab, cross_t=60, velocity=(-4.0, 0.0), lateral=10)],
-              lens=Lens(31, specks=40, defocus=0.8), noise=2.0, jpeg=55),
-        Rough(name="fully covered, briefly", tier="occluded", background=bg_paper, path=straight,
-              radius=8, body=(0,) * 3, rim=(0,) * 3,
+              covers=[Cover("rect", 16, slab, cross_t=cross(60), velocity=(j.scale(-4.0, 0.2), 0.0), lateral=j.shift(10, 3))],
+              lens=lens(31, specks=40, defocus=0.8), noise=noise(2.0), jpeg=q(55), **wall),
+        Rough(name="fully covered, briefly", tier="occluded", radius=size(8), body=(0,) * 3, rim=(0,) * 3,
               blurb="A grey bar passes in front of the ball and hides all of it for a few frames.",
-              covers=[Cover("bar", 20, slab, cross_t=62, velocity=(-3.0, 0.0))],
-              lens=Lens(32, specks=40, defocus=0.8), noise=2.0, jpeg=55),
-        Rough(name="fully covered by a black glove", tier="occluded", background=bg_paper, path=straight,
-              radius=8, body=(0,) * 3, rim=(0,) * 3,
+              covers=[Cover("bar", 20, slab, cross_t=cross(62), velocity=(j.scale(-3.0, 0.2), 0.0))],
+              lens=lens(32, specks=40, defocus=0.8), noise=noise(2.0), jpeg=q(55), **wall),
+        Rough(name="fully covered by a black glove", tier="occluded", radius=size(8), body=(0,) * 3, rim=(0,) * 3,
               blurb="A black glove passes over the ball and hides it for about fifteen frames.",
-              covers=[Cover("blob", 30, HAND, cross_t=58, velocity=(-4.0, 1.3))],
-              lens=Lens(33, specks=40, defocus=0.8), noise=2.0, jpeg=55),
-        Rough(name="covered while still", tier="occluded", background=bg_paper,
-              path=from_rest(path_bounce(6.0, start=(110.0, 80.0), angle_deg=33.0, r=10), 40, 15),
-              radius=8, body=(0,) * 3, rim=(0,) * 3, hold=40,
+              covers=[Cover("blob", 30, HAND, cross_t=cross(58), velocity=(j.scale(-4.0, 0.2), j.shift(1.3, 0.8)))],
+              lens=lens(33, specks=40, defocus=0.8), noise=noise(2.0), jpeg=q(55), **wall),
+        Rough(name="covered while still", tier="occluded", background=bg_paper, path=straight(40, 15),
+              radius=size(8), body=(0,) * 3, rim=(0,) * 3, hold=40, seed=j.seed(1),
               blurb="The ball is at rest when a slab slides across it, before it is released.",
-              covers=[Cover("rect", 22, slab, cross_t=14, velocity=(-5.0, 0.0))],
-              lens=Lens(34, specks=40, defocus=0.8), noise=2.0, jpeg=55),
-        Rough(name="a second steel ball rolls over it", tier="occluded", background=bg_paper, path=straight,
-              radius=8, body=(0,) * 3, rim=(0,) * 3,
+              covers=[Cover("rect", 22, slab, cross_t=cross(14), velocity=(j.scale(-5.0, 0.2), 0.0))],
+              lens=lens(34, specks=40, defocus=0.8), noise=noise(2.0), jpeg=q(55)),
+        Rough(name="a second steel ball rolls over it", tier="occluded", radius=size(8), body=(0,) * 3, rim=(0,) * 3,
               blurb="A second steel ball of the same size rolls across the first and out the other side.",
-              covers=[Cover("ball", 8, (255, 255, 255), cross_t=60, velocity=(-3.0, 0.4))],
-              lens=Lens(35, specks=40, defocus=0.8), noise=2.0, jpeg=55),
-        Rough(name="falls behind a clamp arm in the tube", tier="occluded", radius=7, body=(0,) * 3,
+              covers=[Cover("ball", 8, (255, 255, 255), cross_t=cross(60), velocity=(j.scale(-3.0, 0.2), j.shift(0.4, 0.4)))],
+              lens=lens(35, specks=40, defocus=0.8), noise=noise(2.0), jpeg=q(55), **wall),
+        Rough(name="falls behind a clamp arm in the tube", tier="occluded", radius=size(7), body=(0,) * 3,
               rim=(0,) * 3, blurb="The ball falls behind a horizontal clamp arm, hidden for a few frames, and comes out the other side.",
-              covers=[Cover("arm", 16, (62, 62, 68), fixed=(320.0, 190.0))],
-              lens=Lens(26, smudges=3, specks=50, defocus=1.0), noise=3.0, jpeg=45, **tube),
-        Rough(name="falls behind a clamp arm, filthy lens", tier="occluded", radius=7, body=(0,) * 3,
+              covers=[Cover("arm", 16, (62, 62, 68), fixed=(320.0, j.shift(190.0, 20)))],
+              lens=lens(26, smudges=3, specks=50, defocus=1.0), noise=noise(3.0), jpeg=q(45), **tube),
+        Rough(name="falls behind a clamp arm, filthy lens", tier="occluded", radius=size(7), body=(0,) * 3,
               rim=(0,) * 3, blurb="The same fall behind the clamp arm, through the filthy lens.",
-              covers=[Cover("arm", 16, (62, 62, 68), fixed=(320.0, 190.0))],
-              lens=Lens(25, **filthy), things=_bubbles(5, rng), noise=6.0, flicker=10.0, jpeg=20, **tube),
+              covers=[Cover("arm", 16, (62, 62, 68), fixed=(320.0, j.shift(190.0, 20)))],
+              lens=lens(25, **filthy), things=_bubbles(5, rng), noise=noise(6.0), flicker=10.0, jpeg=q(20), **tube),
     ]
+
+
+# -------------------------------------------------------------------------------------------------
+# A synthetic ball on real footage: the clutter, the person's arm, the noise and the compression
+# are real, and the ball's path is known
+REAL_FOOTAGE = os.environ.get("PHYSTRACK_REAL_FOOTAGE", os.path.expanduser(
+    "~/Library/Mobile Documents/com~apple~CloudDocs/Classwork/P440/Specific_heat/Measurements/Air_trials"))
+
+
+def _real_clip(path: str, start: float, top: int) -> np.ndarray:
+    """N frames of a video from `start` seconds, scaled to W wide and cut to H tall from `top`
+    (cached in the system temp folder)."""
+    import hashlib
+    import subprocess
+    import tempfile
+    from core import find_ffmpeg
+    key = hashlib.sha1(f"{path}|{start}|{top}|{W}x{H}x{N}".encode()).hexdigest()[:16]
+    cache = os.path.join(tempfile.gettempdir(), "phystrack_real_clips", key + ".npy")
+    if os.path.exists(cache):
+        return np.load(cache)
+    out = subprocess.run([find_ffmpeg(), "-v", "error", "-ss", f"{start:.2f}", "-i", path, "-frames:v", str(N),
+                          "-vf", f"scale={W}:-2,crop={W}:{H}:0:{top}", "-f", "rawvideo", "-pix_fmt", "bgr24", "-"],
+                         capture_output=True, check=True).stdout
+    frames = np.frombuffer(out, np.uint8).reshape(-1, H, W, 3)
+    if len(frames) < N:
+        frames = np.concatenate([frames, np.repeat(frames[-1:], N - len(frames), 0)])
+    os.makedirs(os.path.dirname(cache), exist_ok=True)
+    np.save(cache, frames)
+    return frames
+
+
+def build_real_scenarios(count: int = 6, draw: int = 0) -> list:
+    """Synthetic steel balls dropped into stretches of the real Air Trial videos (none when the
+    footage is not on this machine). Each takes a random trial, start time and part of the frame."""
+    if not os.path.isdir(REAL_FOOTAGE):
+        return []
+    videos = sorted(os.path.join(REAL_FOOTAGE, f) for f in os.listdir(REAL_FOOTAGE)
+                    if f.lower().endswith((".mp4", ".mov")) and f.lower().startswith("air trial"))
+    if not videos:
+        return []
+    rng = np.random.default_rng(4242 + 7919 * draw)
+    out = []
+    for k in range(count):
+        video = videos[k % len(videos)]
+        start = float(rng.uniform(1.0, 20.0))
+        top = int(rng.integers(0, 560 // 2) * 2)          # The scaled portrait frame is about 1138 tall
+        frames = _real_clip(video, start, top)
+        path = from_rest(path_tube_drop(x=float(rng.uniform(120, 520)), top=float(rng.uniform(50, 110)),
+                                        rest=float(rng.uniform(220, 380)), period=float(rng.uniform(50, 90))),
+                         hold=int(rng.integers(10, 30)), ramp=int(rng.integers(4, 10)))
+        name = f"real background: {os.path.splitext(os.path.basename(video))[0]} at {start:.1f} s"
+        out.append(Rough(name=name, tier="muddy", background=bg_white, backdrop=(lambda t, f=frames: f[t]),
+                         path=path, radius=float(rng.uniform(4.5, 9.0)), body=(0,) * 3, rim=(0,) * 3,
+                         blurb="A synthetic steel ball dropped over a stretch of a real trial video.",
+                         blur=int(rng.integers(1, 5)), seed=4242 + k))
+    return out
 
 
 # -------------------------------------------------------------------------------------------------

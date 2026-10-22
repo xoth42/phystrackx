@@ -78,24 +78,23 @@
 - Starting any tool cancels the one before it.
 
 ## Open
-- **Background removal (plan, for the blob tracker).** The camera is fixed in almost every lab
-  clip, so everything that does not move (lens dirt, the tube, the clamp stand, the ruler) can be
-  removed before looking for the ball:
-  1. Before tracking, on the worker thread: take about 30 frames spread over the trimmed clip (at
-     proxy size), and store their per-pixel median as the background (a fraction of a second).
-  2. Add a `"foreground"` feature to `FEATURES` in `experiments/rigid/blobtracker.py`: the
-     difference from the background (largest over the colour channels, or Lab distance), blurred
-     like the contrast feature. A variant multiplies the contrast feature by it, so a blob counts
-     only where something has changed.
-  3. A ball at rest at the start is part of the median only if it stays put for more than half the
-     sampled frames. If it does, take the background at the selection from the frames where the ball
-     is far from it (known after a first pass), or fall back to the contrast feature there.
-  4. Lighting changes and flicker: scale each frame to the background's mean brightness first, or
-     keep a slowly updated running median.
-  5. A moving camera breaks it: check the background's shift (phase correlation) on a few frames,
-     and if it moves, stabilise first or turn the feature off.
-  6. Tune it with `tests/tune_tracker.py` (it is a setting, `feature`), and compare per scenario.
-     The muddy scenes (fixed lens dirt) should gain most; covers and look-alikes that move will not.
+- **Tracker route (in progress; defaults unchanged until it is shown on real footage).** Built:
+  the still background (`experiments/rigid/background.py`, `background_mix`, ghosts handled by
+  taking the background again without the ball where a first track shows it resting), the offline
+  engine (`experiments/rigid/cliptrack.py`: candidates in every frame, cheapest path over the clip
+  with jumps for covers and kicks for bounces), the physics fit and label-free checks
+  (`experiments/rigid/physics.py`), the selection offset (`selection_offset`: a shiny ball's blob
+  centre is pulled toward its highlight by 2-4 px; the selection's centre corrects it), outline
+  selections (as the Qt app gives), and real labelled clips (`tests/real_clips.py`,
+  `label_real.py`, `prelabel_real.py`). Compare with `tests/bench_tracker.py`. Still to do:
+  - Check the pre-filled real labels by hand (they are tracker-made, then moved to a circle fit).
+  - The selection offset is wrong when a hand covers the ball on frame 0 (the dropped-ball scene);
+    an outline that leaves the fingers out should fix it: check with the Qt selection.
+  - The offline engine is 3-5x slower than the blob tracker (whole frames, likeness checks); its
+    frames are independent, so they can run in parallel (see the scaling note below).
+  - Tune the whole system together (the background, linking and physics settings are hand-set).
+  - Real-background clips: one has the synthetic ball pass through the video's own ball (not
+    possible in a real tube); keep synthetic paths off the tube.
 - **Scaling with RAM and CPU (note, for when tracking gets too slow).** Today each frame is decoded
   and then tracked on one thread, about 10 ms per frame per object, with objects in parallel
   threads. With memory to spare:

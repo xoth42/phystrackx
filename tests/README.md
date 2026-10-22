@@ -46,12 +46,30 @@ Tools beside the tests (not run by `run_all`):
 - `uv run python -m tests.benchmark_report` writes `temp/benchmark_report.html`: every scenario
   of both benchmarks with a player, the engines' positions, an error chart (hidden frames shaded)
   and the scores, NanoTrack beside the trackpy blob tracker (`--engines`, `--settings`).
-- `uv run python -m tests.tune_tracker` searches the blob tracker's settings with Optuna on 20 of
-  the 25 scenarios (5 are held out) and opens a live page (http://127.0.0.1:8765) with a plot of
-  every trial and Pause, Stop and Show holdout buttons. The best settings go to
-  `temp/tuned_blob_settings.json`. `--score` only scores the defaults (or `--settings FILE`);
-  `--minutes N` sets a time limit; `--resume` continues the last study. Frames are drawn once into
-  `temp/tracker_frames`.
+- `uv run python -m tests.tune_tracker` searches the blob tracker's settings with Optuna and opens
+  a live page (http://127.0.0.1:8765): a plot of every trial, the score's parts (accuracy, speed
+  reward, regression penalty), the top five, which settings matter, and Pause, Stop and Show
+  holdout buttons. It trains on two random draws of 20 scenario kinds (`build_scenarios(draw)`;
+  draw 0 is what the tests use) and holds out an unseen draw of those, five other kinds, and
+  synthetic balls on real Air Trial footage. Each run's study, best and top five go to
+  `temp/tune_runs/<time>/` (the best also to `temp/tuned_blob_settings.json`), saved at every new
+  best. `--minutes N` sets a time limit, `--focus N` runs stage two on the N most important
+  settings of the last run, `--score` only scores, `--view` hosts the page for a run started
+  elsewhere, `--resume` continues the last run. Clips are drawn once into `temp/tracker_frames`
+  (about 2.8 GB).
+- `uv run python -m tests.bench_tracker ENGINE[@SETTINGS.json][,name=value...]` scores a tracking
+  engine (`blob` or `offline`, see `experiments/rigid/cliptrack.py`) on every cached clip and on
+  the labelled real clips, per part, and keeps the result in `temp/bench/<label>.json`;
+  `--compare` lists saved results side by side with the clips that changed most. The ball is
+  selected with an automatic outline, as in the Qt app (`--selection box`: the circle's square).
+- `uv run python -m tests.label_real VIDEO --start S --seconds N` opens a page for labelling the
+  ball's centre in a stretch of a real video (Track pre-fills every frame; you fix it). Labels go to
+  `tests/real_labels/*.json` (`tests/real_clips.py` reads them; the videos stay in
+  `PHYSTRACK_REAL_FOOTAGE`).
+- `uv run python -m tests.prelabel_real` pre-fills those labels without a person: two trackers
+  follow the ball backward from where it rests at the end of each video, and frames where they agree
+  get a label at the ball's geometric centre (a circle fitted to its edge). Such files say
+  `"checked": "pre-filled"` until someone checks them in `label_real`.
 
 ## Notes
 

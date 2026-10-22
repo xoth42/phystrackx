@@ -17,8 +17,11 @@ from core import find_ffmpeg
 
 
 # Encoding quality of the proxy. CRF 28 caused visible blocking around sharp colour edges.
-PROXY_VERSION = "crf18-v2"
+PROXY_VERSION = "crf18-g30-v3"
 PROXY_CRF = "18"
+# Frames between keyframes. A seek decodes from the keyframe before it, so x264's default (250)
+# made a scrub seek about 3x slower (86 vs 27 ms at 1350x760) for about 6% less file size.
+PROXY_GOP = "30"
 
 
 def _cache_key(videopath: str, width: int, height: int) -> str:
@@ -141,6 +144,7 @@ def proxyvideo(videopath: str, width: int = 1000, height: int = -2,
         "-c:v", "libx264",
         "-preset", "veryfast",
         "-crf", PROXY_CRF,
+        "-g", PROXY_GOP,
         "-an", # Strips audio to speed up proxy generation
         partial
     ]

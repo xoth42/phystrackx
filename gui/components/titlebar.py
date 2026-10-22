@@ -18,6 +18,8 @@ class TitleBar:
     Renders a gradient title bar with a logo and title text on a tkinter Canvas.
     """
 
+    TAG = "titlebar"  # Every item of the bar, so the next bar can remove it
+
     def __init__(self, canvas: tk.Canvas, width: int, text: str, height: int = 40) -> None:
         """
         Initialize and draw the title bar.
@@ -31,6 +33,10 @@ class TitleBar:
         self.canvas = canvas
         self.height = height
 
+        # Each tool draws a new bar; without this the old ones (about 110 items each) pile up
+        # under it for the whole session
+        self.canvas.delete(self.TAG)
+
         self._draw_gradient_bar(0, 0, width, height, "#b733f4", "#ba76da", steps=100)
         self._draw_shadow(0, height, width)
 
@@ -39,7 +45,7 @@ class TitleBar:
         logo_img = Image.open(logo_path).resize((20, 20), Image.Resampling.LANCZOS)
         self.logo = ImageTk.PhotoImage(logo_img)
 
-        self.canvas.create_image(20, 10, image=self.logo, anchor="nw")
+        self.canvas.create_image(20, 10, image=self.logo, anchor="nw", tags=self.TAG)
 
         # Title text
         self.canvas.create_text(
@@ -47,6 +53,7 @@ class TitleBar:
             anchor="w",
             text=text,
             fill="#ffffff",
+            tags=self.TAG,
             font=font.Font(family="Segoe UI", size=20, weight="bold")
         )
 
@@ -63,14 +70,14 @@ class TitleBar:
             b = int(b1 + (b2 - b1) * ratio)
             hex_color = f"#{r:02x}{g:02x}{b:02x}"
             y = y1 + ((y2 - y1) * ratio)
-            self.canvas.create_line(x1, y, x2, y, fill=hex_color)
+            self.canvas.create_line(x1, y, x2, y, fill=hex_color, tags=self.TAG)
 
     def _draw_shadow(self, x1: int, y_start: int, x2: int, height: int = 10) -> None:
         """Draw a shadow gradient beneath the title bar."""
         for i in range(height):
             alpha = int(80 * (1 - i / height))
             shade = f"#{alpha:02x}{alpha:02x}{alpha:02x}"
-            self.canvas.create_line(x1, y_start + i, x2, y_start + i, fill=shade)
+            self.canvas.create_line(x1, y_start + i, x2, y_start + i, fill=shade, tags=self.TAG)
 
     def _hex_to_rgb(self, hex_color: str) -> tuple[int, int, int]:
         """Convert a hex color string to an (R, G, B) tuple."""

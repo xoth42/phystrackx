@@ -6,20 +6,30 @@ the browser shows the run live and lets you pause, resume or stop it.
     uv run python -m tests.tune_tracker                  # search until stopped from the page
     uv run python -m tests.tune_tracker --minutes 20     # ...or for 20 minutes at most
     uv run python -m tests.tune_tracker --score          # only score the defaults (or --settings FILE)
+    uv run python -m tests.tune_tracker --focus 8        # stage two: the 8 settings that mattered most
+    uv run python -m tests.tune_tracker --view           # host the page for a run started elsewhere
 
 The page is at http://127.0.0.1:8765 (opened in the browser at the start; --port, --no-browser).
 
-- Holdout: five scenarios (HOLDOUT) never take part in the search. "Show holdout" on the page
-  scores the current best settings, and the defaults, on them, to see whether a gain carries over
-  to footage the search did not see.
-- Pruning: each trial runs the training scenarios in groups, the hardest first (by the defaults'
+- Clips: every scenario kind comes in random draws (Jitter: the ball's size, path and release,
+  where covers cross, the lens dirt, noise, compression). The search trains on draws TRAIN_DRAWS
+  of the training kinds.
+- Holdout, never part of the search, in three parts (PARTS): an unseen draw of every training kind,
+  draws of five held-out kinds (HOLDOUT), and synthetic balls on stretches of the real Air Trial
+  videos (when that footage is on this machine; PHYSTRACK_REAL_FOOTAGE names its folder). "Show
+  holdout" on the page scores the current best settings and the defaults on each part.
+- Pruning: each trial runs the training clips in groups, the hardest first (by the defaults'
   scores), and Optuna's median pruner stops a trial early when its first groups are already worse
   than the median of earlier trials at the same point.
-- Two trials run at once, each spreading its scenarios over the worker processes.
-- The frames of every scenario are drawn once and kept in temp/tracker_frames (grey, as the
-  tracker uses them; redrawn when the drawn footage changes).
-- At the end the best settings are saved to temp/tuned_blob_settings.json, and the study to
-  temp/tune_study.log (an Optuna journal: --resume continues it).
+- Two trials run at once, each spreading its clips over the worker processes (one per physical
+  core; tracking time is each process's CPU time, so the speed reward is not upset by load).
+- The clips are drawn once and kept in temp/tracker_frames (grey, as the tracker uses them;
+  redrawn when the drawn footage changes).
+- Each run has a folder in temp/tune_runs: the Optuna journal (study.log; --resume continues the
+  latest), best.json and top5.json (written at every new best), and holdout.json at the end. The
+  best is also copied to temp/tuned_blob_settings.json.
+- Stage two (--focus N): the N settings that mattered most in a previous run (--previous FOLDER,
+  default the latest), in narrowed ranges around its best, with the others fixed at that best.
 
 A trial's score is accuracy + speed - regression (combine()):
 - accuracy: the mean over the scenarios of
@@ -29,12 +39,12 @@ A trial's score is accuracy + speed - regression (combine()):
       + 0.05 if it meets its scenario's target (the tests' thresholds)
   so 1.05 is perfect;
 - speed: 0.04 per doubling of speed against the defaults (negative when slower), within -0.12..+0.08;
-- regression: for each scenario that scores more than 0.02 below the defaults, that drop again
-  (averaged over the scenarios), so trading a working scenario for another costs extra.
+- regression: for each clip that scores more than 0.02 below the defaults on that same clip, that
+  drop again (averaged over the clips), so trading a working scenario for another costs extra.
 
 To watch a run started elsewhere (or with --no-page): `uv run python -m tests.tune_tracker --view`
 hosts the same page from temp/tune_state.json, and its buttons reach the run through
-temp/tune_control.txt. The best settings and the top five trials are saved at every new best.
+temp/tune_control.txt.
 
 The benchmarks are synthetic and few: keep changes that make sense and that hold on the holdout,
 and check them on real clips.
@@ -56,16 +66,23 @@ import numpy as np
 from tests import harness as h
 
 CACHE = os.path.join(h.REPO, "temp", "tracker_frames")
-OUT = os.path.join(h.REPO, "temp", "tuned_blob_settings.json")
-JOURNAL = os.path.join(h.REPO, "temp", "tune_study.log")
-TOP = os.path.join(h.REPO, "temp", "tuned_top5.json")
+RUNS = os.path.join(h.REPO, "temp", "tune_runs")              # One folder per run: study, best, top five
+OUT = os.path.join(h.REPO, "temp", "tuned_blob_settings.json")  # The latest run's best
 STATE = os.path.join(h.REPO, "temp", "tune_state.json")      # Read by --view
 CONTROL = os.path.join(h.REPO, "temp", "tune_control.txt")   # Written by --view
 
-# Kept out of the search: one of each kind of difficulty
+# Which clips train and which test. Every scenario kind comes in several random draws (draw 0 is
+# the one the tests use); see Jitter in test_tracker_scenarios
+TRAIN_DRAWS = (0, 1)           # Draws of the training kinds that the search sees
+NEW_DRAW = 3                   # Holdout: an unseen draw of every training kind
+HOLDOUT_KIND_DRAWS = (0, 1, 2)  # Holdout: these draws of the held-out kinds
+REAL_CLIPS = 6                 # Holdout: synthetic balls on real Air Trial footage (if on this machine)
+# Kinds kept out of the search: one of each kind of difficulty
 HOLDOUT = ["glass tube, glare, fog and scratches", "tiny steel ball, filthy lens",
            "falls behind a clamp arm, filthy lens", "paper wall, look-alike ball",
            "camouflage, fine pattern, look-alikes"]
+PARTS = {"draw": "unseen draws of the training kinds", "kind": "held-out kinds",
+         "real": "real Air Trial backgrounds"}
 
 # The search space: name -> ("float", low, high, log) | ("int", low, high) | ("choice", options)
 # mass_lo and mass_hi make up mass_range
@@ -88,57 +105,93 @@ SPACE = {
 
 
 # -------------------------------------------------------------------------------------------------
-# The frames, drawn once
-def _scenarios():
+# The clips, drawn once
+def _build(kind: str, draw: int) -> list:
     from tests import test_tracker_muddy as m, test_tracker_scenarios as s
-    return [("muddy", i, scn) for i, scn in enumerate(m.build_scenarios())] + \
-           [("clean", i, scn) for i, scn in enumerate(s.build_scenarios())]
+    if kind == "real":
+        return m.build_real_scenarios(REAL_CLIPS)
+    return (m.build_scenarios if kind == "muddy" else s.build_scenarios)(draw)
 
 
-def _stamp() -> str:
-    """A fingerprint of what the scenarios draw (two frames of each, and their paths), so an edit
-    to the test files that does not change the footage keeps the cache."""
+def catalogue() -> list:
+    """Every clip: {key, kind, draw, index, part}, part being "train" or a holdout part (PARTS)."""
+    from tests import test_tracker_muddy as m, test_tracker_scenarios as s
+    out = []
+    for kind, names in (("muddy", [x.name for x in m.build_scenarios()]),
+                        ("clean", [x.name for x in s.build_scenarios()])):
+        for i, name in enumerate(names):
+            for draw in sorted(set(TRAIN_DRAWS) | set(HOLDOUT_KIND_DRAWS) | {NEW_DRAW}):
+                if name in HOLDOUT:
+                    part = "kind" if draw in HOLDOUT_KIND_DRAWS else None
+                else:
+                    part = "train" if draw in TRAIN_DRAWS else "draw" if draw == NEW_DRAW else None
+                if part:
+                    out.append({"key": f"{kind}{i:02d}d{draw}", "kind": kind, "draw": draw, "index": i, "part": part})
+    if m.build_real_scenarios(1):  # Only when the real footage is on this machine
+        out += [{"key": f"real{k}", "kind": "real", "draw": 0, "index": k, "part": "real"} for k in range(REAL_CLIPS)]
+    return out
+
+
+def _fingerprint(scn) -> str:
     from tests.test_tracker_scenarios import N
     digest = hashlib.sha256()
-    for kind, i, scn in _scenarios():
-        for t in (1, N // 2):
-            digest.update(scn.frame(t).tobytes())
-            digest.update(np.float64(scn.truth(t)).tobytes())
+    for t in (1, N // 2):
+        digest.update(scn.frame(t).tobytes())
+        digest.update(np.float64(scn.truth(t)).tobytes())
     return digest.hexdigest()[:16]
 
 
-def _draw(arg):
+def _draw_group(arg):
+    """Draws the clips of one scenario list (one kind and draw) whose cached copy is missing or
+    out of date. Returns the number drawn."""
+    kind, draw, entries = arg
     h.setup_env()
     import cv2
-    kind, i = arg
-    scn = next(scn for k, j, scn in _scenarios() if k == kind and j == i)
     from tests.test_tracker_scenarios import N
-    gray = np.stack([cv2.cvtColor(scn.frame(t), cv2.COLOR_BGR2GRAY) for t in range(N)])
-    cover = [scn.cover(t) if hasattr(scn, "cover") else 0.0 for t in range(N)]
-    base = os.path.join(CACHE, f"{kind}{i:02d}")
-    np.save(base + ".npy", gray)
-    with open(base + ".json", "w") as f:
-        json.dump({"name": scn.name, "kind": kind, "tier": scn.tier, "radius": scn.radius,
-                   "truth": [list(map(float, scn.truth(t))) for t in range(N)], "cover": cover,
-                   "target": list(scn.target)}, f)
-    return base
+    prints = [_fingerprint(scn) for scn in _build(kind, draw)]
+    stale = []
+    for e in entries:
+        base = os.path.join(CACHE, e["key"])
+        try:
+            with open(base + ".json") as f:
+                current = json.load(f).get("fingerprint") == prints[e["index"]] and os.path.exists(base + ".npy")
+        except (OSError, ValueError):
+            current = False
+        if not current:
+            stale.append(e)
+    if not stale:
+        return 0
+    scenarios = _build(kind, draw)  # Fresh: some scenarios' noise depends on the frames drawn before
+    for e in stale:
+        scn = scenarios[e["index"]]
+        gray = np.stack([cv2.cvtColor(scn.frame(t), cv2.COLOR_BGR2GRAY) for t in range(N)])
+        cover = [scn.cover(t) if hasattr(scn, "cover") else 0.0 for t in range(N)]
+        base = os.path.join(CACHE, e["key"])
+        np.save(base + ".npy", gray)
+        name = scn.name + (f" (draw {draw})" if draw and kind != "real" else "")
+        with open(base + ".json", "w") as f:
+            json.dump({"name": name, "kind": kind, "part": e["part"], "tier": scn.tier, "radius": scn.radius,
+                       "truth": [list(map(float, scn.truth(t))) for t in range(N)], "cover": cover,
+                       "target": list(scn.target), "fingerprint": prints[e["index"]]}, f)
+    return len(stale)
 
 
-def ensure_frames(jobs: int) -> list:
-    """The cached scenarios' paths (without extension), drawing them when missing or stale."""
+def ensure_frames(jobs: int) -> dict:
+    """The cached clips' paths (without extension) by part, drawing those missing or out of date."""
     os.makedirs(CACHE, exist_ok=True)
-    stamp_file = os.path.join(CACHE, "stamp")
-    stamp = _stamp()
-    keys = [(kind, i) for kind, i, _ in _scenarios()]
-    paths = [os.path.join(CACHE, f"{kind}{i:02d}") for kind, i in keys]
-    current = os.path.exists(stamp_file) and open(stamp_file).read() == stamp
-    if not current or not all(os.path.exists(p + ".npy") for p in paths):
-        print(f"drawing {len(keys)} scenarios into {os.path.relpath(CACHE, h.REPO)} ...", flush=True)
-        with ProcessPoolExecutor(jobs) as ex:
-            list(ex.map(_draw, keys))
-        with open(stamp_file, "w") as f:
-            f.write(stamp)
-    return paths
+    entries = catalogue()
+    groups = {}
+    for e in entries:
+        groups.setdefault((e["kind"], e["draw"]), []).append(e)
+    start = time.time()
+    with ProcessPoolExecutor(jobs) as ex:
+        drawn = sum(ex.map(_draw_group, [(k, d, es) for (k, d), es in groups.items()]))
+    print(f"{len(entries)} clips ready in {os.path.relpath(CACHE, h.REPO)} ({drawn} drawn, "
+          f"{time.time() - start:.0f} s)", flush=True)
+    parts = {}
+    for e in entries:
+        parts.setdefault(e["part"], []).append(os.path.join(CACHE, e["key"]))
+    return parts
 
 
 def physical_cores() -> int:
@@ -152,45 +205,57 @@ def physical_cores() -> int:
         return max(1, (os.cpu_count() or 2) // 2)
 
 
-def _name(path) -> str:
-    with open(path + ".json") as f:
-        return json.load(f)["name"]
-
-
 # -------------------------------------------------------------------------------------------------
 # One scenario, one setting
 def run_one(arg):
-    """Tracks one cached scenario with the given settings; returns its scores."""
-    path, values = arg
+    """Tracks one cached clip with the given settings; returns its scores. With a budget (ms per
+    frame), a run that is slower than that on average after 10 frames stops there, and the rest of
+    the clip counts as lost (a lost tracker searching wide areas would otherwise take minutes).
+    `engine` is a cliptrack engine ("blob" unless given). `selection` is how the ball is selected on
+    frame 0: "box" (the square around its circle, as the circle tool gives; the default) or
+    "outline" (an automatic outline, as the Qt app gives: see outline_selection)."""
+    path, values, budget, engine, selection = (tuple(arg) + (None, None, None))[:5]
     h.setup_env()
     import cv2
     cv2.setNumThreads(1)  # One thread per worker: the workers already fill the cores
     from core import PixelRect
-    from experiments.rigid.blobtracker import BlobSettings, BlobTracker
-    from tests.test_tracker_muddy import RECOVERY_LIMIT, analyse
+    from experiments.rigid.cliptrack import track_frames
     gray = np.load(path + ".npy", mmap_mode="r")
     with open(path + ".json") as f:
         meta = json.load(f)
-    truth = np.array(meta["truth"])
-    n = len(truth)
-    tracker = BlobTracker(BlobSettings.from_dict(values))
     r = int(round(meta["radius"]))
-    x0, y0 = truth[0]
-    tracker.initialize_tracker(np.asarray(gray[0]), PixelRect(int(round(x0)) - r, int(round(y0)) - r, 2 * r, 2 * r))
-    centre = np.zeros((n, 2))
+    x0, y0 = meta["truth"][0]
+    rect = PixelRect(int(round(x0)) - r, int(round(y0)) - r, 2 * r, 2 * r)
+    outline = outline_selection(path, meta) if selection == "outline" else None
+    out = track_frames(gray, rect, engine or "blob", values, budget, outline=outline)
+    return score_clip(path, meta, out)
+
+
+SELECTION_ERROR = (0.5, 0.08)  # An outline point's error: this many pixels, or this share of the radius if more
+
+
+def outline_selection(path, meta):
+    """An automatic selection's outline of the ball on frame 0: its true circle as 32 points, each
+    off by a random error (SELECTION_ERROR), the same for a clip every time."""
+    rng = np.random.default_rng(int(hashlib.sha1(os.path.basename(path).encode()).hexdigest()[:8], 16))
+    r = meta["radius"]
+    error = max(SELECTION_ERROR[0], SELECTION_ERROR[1] * r)
+    angle = np.linspace(0, 2 * np.pi, 32, endpoint=False)
+    reach = r + rng.normal(0, error, 32)
+    x0, y0 = meta["truth"][0]
+    return np.column_stack([x0 + reach * np.cos(angle), y0 + reach * np.sin(angle)])
+
+
+def score_clip(path, meta, out) -> dict:
+    """A clip's scores (see the module's docstring) from a cliptrack result."""
+    from tests.test_tracker_muddy import RECOVERY_LIMIT, analyse
+    truth = np.array(meta["truth"])
+    centre = out.centre.copy()
     centre[0] = truth[0]
-    lost = np.zeros(n, bool)
-    start = time.process_time()  # This process's CPU time: not inflated by other work on the machine
-    for t in range(1, n):
-        ok, _ = tracker.update_tracker(np.asarray(gray[t]))
-        if ok:
-            centre[t] = tracker.centre
-        else:
-            centre[t], lost[t] = centre[t - 1], True
-    ms = 1000 * (time.process_time() - start) / (n - 1)
     error = np.hypot(*(centre - truth).T)
     scn = SimpleNamespace(radius=meta["radius"], cover=lambda t: meta["cover"][t])
-    res = analyse(scn, SimpleNamespace(error=error, lost=lost))
+    res = analyse(scn, SimpleNamespace(error=error, lost=out.lost))
+    ms = out.ms_per_frame
     score = res.on_ball - 0.02 * min(res.median / meta["radius"], 1.0)
     limit = meta["target"][3] if len(meta["target"]) > 3 else RECOVERY_LIMIT
     if res.recovery is not None:
@@ -200,7 +265,8 @@ def run_one(arg):
              and (res.recovery is None or res.recovery <= limit))
     score += 0.05 * meets
     rec = None if res.recovery is None else (-1 if res.recovery == float("inf") else int(res.recovery))
-    return {"name": meta["name"], "kind": meta["kind"], "score": score, "on_ball": res.on_ball,
+    return {"name": meta["name"], "clip": os.path.basename(path), "part": meta.get("part", "train"),
+            "kind": meta["kind"], "score": score, "on_ball": res.on_ball,
             "median": res.median, "recovery": rec, "meets": bool(meets), "ms": ms}
 
 
@@ -208,27 +274,38 @@ SPEED_WEIGHT = 0.04                # Score per doubling of speed against the def
 SPEED_LIMITS = (-0.12, 0.08)       # ...kept within these
 REGRESSION_WEIGHT = 1.0            # Extra loss per point a scenario drops below the defaults' score
 REGRESSION_TOLERANCE = 0.02        # ...ignoring drops this small (timing and rounding noise)
+BUDGET = 5.0                       # A clip slower than this many times the defaults is cut short
 
 
 def combine(rows, reference: dict, reference_ms: float) -> dict:
     """The trial score from per-scenario rows: accuracy (the mean scenario score), plus a reward
     for being faster than the defaults, minus an extra penalty for every scenario that does worse
-    than the defaults did (`reference`: scenario name -> the defaults' row)."""
+    than the defaults did on the same clip (`reference`: clip -> the defaults' row)."""
     accuracy = float(np.mean([r["score"] for r in rows]))
     ms = float(np.mean([r["ms"] for r in rows]))
     speed = float(np.clip(SPEED_WEIGHT * np.log2(reference_ms / max(ms, 1e-3)), *SPEED_LIMITS))
-    drops = [max(0.0, reference[r["name"]]["score"] - r["score"] - REGRESSION_TOLERANCE)
-             for r in rows if r["name"] in reference]
+    drops = [max(0.0, reference[r["clip"]]["score"] - r["score"] - REGRESSION_TOLERANCE)
+             for r in rows if r["clip"] in reference]
     regression = REGRESSION_WEIGHT * float(np.mean(drops)) if drops else 0.0
-    worse = [r["name"] for r in rows if r["name"] in reference
-             and reference[r["name"]]["score"] - r["score"] > REGRESSION_TOLERANCE]
+    worse = [r["name"] for r in rows if r["clip"] in reference
+             and reference[r["clip"]]["score"] - r["score"] > REGRESSION_TOLERANCE]
     return {"value": accuracy + speed - regression, "accuracy": accuracy, "speed": speed,
             "regression": regression, "ms": ms, "worse": worse,
             "meets": sum(r["meets"] for r in rows)}
 
 
-def evaluate(pool, paths, values: dict) -> tuple[float, list]:
-    rows = list(pool.map(run_one, [(p, values) for p in paths]))
+def score_parts(pool, parts: dict, values: dict) -> dict:
+    """Scores settings on each holdout part: {"value": mean over all, "parts": {part: value}, "rows"}."""
+    paths = [p for ps in parts.values() for p in ps]
+    value, rows = evaluate(pool, paths, values)
+    by = {}
+    for r in rows:
+        by.setdefault(r["part"], []).append(r["score"])
+    return {"value": value, "parts": {k: float(np.mean(v)) for k, v in by.items()}, "rows": rows}
+
+
+def evaluate(pool, paths, values: dict, budget=None) -> tuple[float, list]:
+    rows = list(pool.map(run_one, [(p, values, budget) for p in paths]))
     return float(np.mean([row["score"] for row in rows])), rows
 
 
@@ -244,11 +321,14 @@ def show(rows, total) -> None:
 
 # -------------------------------------------------------------------------------------------------
 # Settings <-> Optuna parameters
-def suggest(trial) -> dict:
+def suggest(trial, space=None, fixed=None) -> dict:
+    """Settings for a trial: the space's settings picked by Optuna, the rest from `fixed` (or the
+    defaults)."""
     from experiments.rigid.blobtracker import BlobSettings
-    values = BlobSettings().to_dict()
+    space = space or SPACE
+    values = dict(fixed or BlobSettings().to_dict())
     picked = {}
-    for name, spec in SPACE.items():
+    for name, spec in space.items():
         if spec[0] == "choice":
             picked[name] = trial.suggest_categorical(name, spec[1])
         elif spec[0] == "int":
@@ -256,15 +336,22 @@ def suggest(trial) -> dict:
         else:
             picked[name] = trial.suggest_float(name, spec[1], spec[2], log=spec[3])
     values.update({k: v for k, v in picked.items() if k in values})
-    values["mass_range"] = (picked["mass_lo"], picked["mass_hi"])
+    lo, hi = values["mass_range"]
+    values["mass_range"] = (picked.get("mass_lo", lo), picked.get("mass_hi", hi))
     return values
 
 
-def as_params(values: dict) -> dict:
-    """Settings as Optuna parameters (to queue a known setting as a trial)."""
-    params = {k: values[k] for k in SPACE if k in values}
-    params["mass_lo"], params["mass_hi"] = values["mass_range"]
-    return params
+def as_params(values: dict, space=None) -> dict:
+    """Settings as Optuna parameters of `space` (to queue a known setting as a trial)."""
+    space = space or SPACE
+    every = dict(values, mass_lo=values["mass_range"][0], mass_hi=values["mass_range"][1])
+    out = {}
+    for k, spec in space.items():
+        v = every[k]
+        if spec[0] in ("float", "int"):
+            v = min(max(v, spec[1]), spec[2])  # A start outside the range is moved to its edge
+        out[k] = v
+    return out
 
 
 def changes(values: dict) -> dict:
@@ -284,8 +371,11 @@ def changes(values: dict) -> dict:
 class Run:
     """The search's state, shared between the trials, the controls and the page."""
 
-    def __init__(self, pool, train, holdout, groups, reference, reference_ms):
-        self.pool, self.train, self.holdout, self.groups = pool, train, holdout, groups
+    def __init__(self, pool, train, holdout, groups, reference, reference_ms, folder):
+        self.pool, self.train, self.groups = pool, train, groups
+        self.holdout = holdout      # part -> clip paths
+        self.folder = folder        # This run's folder
+        self.budget = BUDGET * reference_ms  # ms per frame after which a clip is cut short
         self.reference, self.reference_ms = reference, reference_ms  # The defaults, per scenario
         self.lock = threading.Lock()
         self.go = threading.Event()
@@ -302,6 +392,7 @@ class Run:
         self.holdout_busy = False
         self.importance = []        # [(setting, importance)], refreshed every few minutes
         self.study = None
+        self.objective_space = (SPACE, None)  # (space, fixed values) for stage two
 
     # The controls
     def control(self, action):
@@ -331,14 +422,12 @@ class Run:
         try:
             from experiments.rigid.blobtracker import BlobSettings
             if "default" not in self.holdout_results:
-                value, rows = evaluate(self.pool, self.holdout, BlobSettings().to_dict())
-                self.holdout_results["default"] = {"value": value, "rows": rows}
+                self.holdout_results["default"] = score_parts(self.pool, self.holdout, BlobSettings().to_dict())
             while self.show_holdout:
                 best = self.best
                 if best is None or best["n"] in self.holdout_results:
                     break
-                value, rows = evaluate(self.pool, self.holdout, best["values"])
-                self.holdout_results[best["n"]] = {"value": value, "rows": rows}
+                self.holdout_results[best["n"]] = score_parts(self.pool, self.holdout, best["values"])
         finally:
             self.holdout_busy = False
 
@@ -347,13 +436,13 @@ class Run:
         import optuna
         if self.wait():
             raise optuna.TrialPruned()
-        values = suggest(trial)
+        values = suggest(trial, *self.objective_space)
         start = time.time()
         rows = []
         for step, group in enumerate(self.groups):
             if self.wait():
                 raise optuna.TrialPruned()
-            rows += list(self.pool.map(run_one, [(p, values) for p in group]))
+            rows += list(self.pool.map(run_one, [(p, values, self.budget) for p in group]))
             parts = combine(rows, self.reference, self.reference_ms)
             trial.report(parts["value"], step)
             if trial.should_prune():
@@ -383,10 +472,13 @@ class Run:
         return entry
 
     def save(self):
-        """The best settings and the top five, written at every new best."""
-        with open(OUT, "w") as f:
-            json.dump(self.best["values"], f, indent=1)
-        with open(TOP, "w") as f:
+        """The best settings and the top five, written at every new best (into the run's folder,
+        and the best also to OUT)."""
+        for path in (os.path.join(self.folder, "best.json"), OUT):
+            with open(path + ".part", "w") as f:
+                json.dump(self.best["values"], f, indent=1)
+            os.replace(path + ".part", path)
+        with open(os.path.join(self.folder, "top5.json"), "w") as f:
             json.dump([{k: t[k] for k in ("n", "value", "accuracy", "speed", "regression", "ms",
                                           "meets", "worse", "values")} for t in self.top], f, indent=1)
 
@@ -428,7 +520,8 @@ class Run:
             "best": None if best is None else dict(slim(best), rows=best["rows"]),
             "top": [slim(t) for t in top],
             "importance": self.importance,
-            "holdout_names": [_name(p) for p in self.holdout],
+            "holdout_parts": {part: {"label": PARTS[part], "count": len(paths)} for part, paths in self.holdout.items()},
+            "folder": os.path.relpath(self.folder, h.REPO),
             "show_holdout": self.show_holdout, "holdout_busy": self.holdout_busy,
             "holdout": {str(k): v for k, v in self.holdout_results.items()},
         }
@@ -500,7 +593,7 @@ def view(port: int, browser: bool) -> None:
         except (OSError, ValueError):
             return {"status": "waiting for a run", "elapsed": 0, "trials": [], "complete": 0, "pruned": 0,
                     "baseline": None, "best": None, "top": [], "importance": [], "holdout": {},
-                    "holdout_names": [], "show_holdout": False}
+                    "holdout_parts": {}, "show_holdout": False}
 
     def on_control(action):
         with open(CONTROL, "a") as f:
@@ -519,72 +612,128 @@ def view(port: int, browser: bool) -> None:
 
 
 # -------------------------------------------------------------------------------------------------
+def latest_run() -> str | None:
+    if not os.path.isdir(RUNS):
+        return None
+    runs = sorted(d for d in os.listdir(RUNS) if os.path.exists(os.path.join(RUNS, d, "study.log")))
+    return os.path.join(RUNS, runs[-1]) if runs else None
+
+
+def focus(previous: str, count: int) -> tuple[dict, dict]:
+    """Stage two: the `count` settings that mattered most in a previous run, searched in narrowed
+    ranges around its best; every other setting fixed at that best. Returns (space, fixed values)."""
+    import optuna
+    from optuna.storages import JournalStorage
+    from optuna.storages.journal import JournalFileBackend
+    from experiments.rigid.blobtracker import BlobSettings
+    study = optuna.load_study(study_name="blob-tracker",
+                              storage=JournalStorage(JournalFileBackend(os.path.join(previous, "study.log"))))
+    with open(os.path.join(previous, "best.json")) as f:
+        best = BlobSettings.from_dict(json.load(f)).to_dict()
+    ranked = list(optuna.importance.get_param_importances(study))[:count]
+    current = as_params(best, SPACE)
+    space = {}
+    for name in ranked:
+        spec, v = SPACE[name], current[name]
+        if spec[0] == "choice":
+            space[name] = spec
+        elif spec[0] == "int":
+            space[name] = ("int", max(spec[1], v - 1), min(spec[2], v + 1))
+        elif spec[3]:  # Log scale: within a factor of 1.6
+            space[name] = ("float", max(spec[1], v / 1.6), min(spec[2], v * 1.6), True)
+        else:          # Linear: within a quarter of the original range
+            w = 0.25 * (spec[2] - spec[1])
+            space[name] = ("float", max(spec[1], v - w), min(spec[2], v + w), False)
+    print(f"stage two from {os.path.relpath(previous, h.REPO)}: searching {', '.join(ranked)}", flush=True)
+    return space, best
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__.split("\n\n")[0])
     parser.add_argument("--score", action="store_true", help="only score the settings, no search")
     parser.add_argument("--view", action="store_true", help="host the page for a run started elsewhere")
     parser.add_argument("--settings", help="a JSON file of settings (to score, or to start from)")
     parser.add_argument("--minutes", type=float, help="stop after this long (default: when stopped)")
+    parser.add_argument("--focus", type=int, metavar="N",
+                        help="stage two: search only the N most important settings of a previous run")
+    parser.add_argument("--previous", help="the run folder --focus starts from (default: the latest)")
     parser.add_argument("--jobs", type=int, default=physical_cores(), help="worker processes (default: physical cores)")
     parser.add_argument("--parallel", type=int, default=2, help="trials run at once")
     parser.add_argument("--port", type=int, default=8765)
     parser.add_argument("--no-page", action="store_true", help="no page from the run itself (use --view)")
     parser.add_argument("--no-browser", action="store_true")
-    parser.add_argument("--resume", action="store_true", help="continue the study in temp/tune_study.log")
+    parser.add_argument("--resume", action="store_true", help="continue the latest run's study")
     args = parser.parse_args()
     if args.view:
         view(args.port, not args.no_browser)
         return
     h.setup_env()
     from experiments.rigid.blobtracker import BlobSettings
-    start_values = BlobSettings().to_dict()
+    defaults = BlobSettings().to_dict()
+    start_values = defaults
     if args.settings:
         with open(args.settings) as f:
             start_values = BlobSettings.from_dict(json.load(f)).to_dict()
-    paths = ensure_frames(args.jobs)
-    holdout = [p for p in paths if _name(p) in HOLDOUT]
-    train = [p for p in paths if p not in holdout]
+    space, fixed = SPACE, None
+    if args.focus:
+        previous = args.previous or latest_run()
+        if previous is None:
+            raise SystemExit("--focus needs a previous run (temp/tune_runs is empty)")
+        space, fixed = focus(previous, args.focus)
+        start_values = fixed
+    parts = ensure_frames(args.jobs)
+    train = parts.pop("train")
+    holdout = parts
     with ProcessPoolExecutor(args.jobs) as pool:
         if args.score:
-            print("training scenarios:")
+            print("training clips:")
             show(*reversed(evaluate(pool, train, start_values)))
-            print("holdout scenarios:")
-            show(*reversed(evaluate(pool, holdout, start_values)))
+            for part, paths in holdout.items():
+                print(f"holdout, {PARTS[part]}:")
+                show(*reversed(evaluate(pool, paths, start_values)))
             return
         import optuna
         from optuna.storages import JournalStorage
         from optuna.storages.journal import JournalFileBackend
         optuna.logging.set_verbosity(optuna.logging.WARNING)
-        # The defaults: the reference for speed and for regressions, and the order of the
-        # scenarios (hardest first, so the pruner sees the ones that tell settings apart early).
+        # The defaults: the reference for speed and for regressions (per clip), and the order of
+        # the clips (hardest first, so the pruner sees the ones that tell settings apart early).
         # Timed twice and the faster kept, as the first run also warms the workers up
-        _, rows = evaluate(pool, train, BlobSettings().to_dict())
-        _, again = evaluate(pool, train, BlobSettings().to_dict())
+        _, rows = evaluate(pool, train, defaults)
+        _, again = evaluate(pool, train, defaults)
         rows = [a if a["ms"] <= b["ms"] else b for a, b in zip(rows, again)]
-        reference = {r["name"]: r for r in rows}
+        reference = {r["clip"]: r for r in rows}
         reference_ms = float(np.mean([r["ms"] for r in rows]))
         order = sorted(range(len(train)), key=lambda i: rows[i]["score"])
         groups = [[train[i] for i in order[k:k + args.jobs]] for k in range(0, len(order), args.jobs)]
-        run = Run(pool, train, holdout, groups, reference, reference_ms)
+        folder = latest_run() if args.resume else None
+        if folder is None:
+            folder = os.path.join(RUNS, time.strftime("%Y%m%d-%H%M%S") + ("-focus" if args.focus else ""))
+        os.makedirs(folder, exist_ok=True)
+        run = Run(pool, train, holdout, groups, reference, reference_ms, folder)
         run.baseline = dict(combine(rows, reference, reference_ms), rows=rows)
-        print(f"defaults on the {len(train)} training scenarios: accuracy {run.baseline['accuracy']:.4f}, "
-              f"{reference_ms:.1f} ms/frame, meets {run.baseline['meets']}/{len(rows)}", flush=True)
-        if not args.resume and os.path.exists(JOURNAL):
-            os.remove(JOURNAL)
+        print(f"defaults on the {len(train)} training clips: accuracy {run.baseline['accuracy']:.4f}, "
+              f"{reference_ms:.1f} ms/frame, meets {run.baseline['meets']}/{len(rows)}; holdout: "
+              + ", ".join(f"{len(p)} {PARTS[k]}" for k, p in holdout.items()), flush=True)
+        print(f"this run's folder: {os.path.relpath(folder, h.REPO)}", flush=True)
         study = optuna.create_study(
             study_name="blob-tracker", direction="maximize", load_if_exists=True,
-            storage=JournalStorage(JournalFileBackend(JOURNAL)),
-            sampler=optuna.samplers.TPESampler(seed=1, multivariate=True, n_startup_trials=12),
+            storage=JournalStorage(JournalFileBackend(os.path.join(folder, "study.log"))),
+            sampler=optuna.samplers.TPESampler(seed=int(time.time()) % 100000, multivariate=True,
+                                               n_startup_trials=12),
             pruner=optuna.pruners.MedianPruner(n_startup_trials=8, n_warmup_steps=0))
         run.study = study
+        run.objective_space = (space, fixed)
         if not args.resume:
-            study.enqueue_trial(as_params(start_values))
+            study.enqueue_trial(as_params(start_values, space))
+            if start_values != defaults and not args.focus:
+                study.enqueue_trial(as_params(defaults, space))
         threading.Thread(target=run.mirror, daemon=True).start()
         threading.Thread(target=run.refresh_importance, daemon=True).start()
         server = None
+        url = f"http://127.0.0.1:{args.port}"
         if not args.no_page:
             server = serve(args.port, run.state, run.control)
-            url = f"http://127.0.0.1:{args.port}"
             print(f"live page: {url}", flush=True)
             if not args.no_browser:
                 webbrowser.open(url)
@@ -605,16 +754,22 @@ def main() -> None:
             print(f"\nbest: trial {best['n']}, score {best['value']:.4f} (accuracy {best['accuracy']:.4f}, "
                   f"speed {best['speed']:+.3f}, regression -{best['regression']:.3f}, {best['ms']:.1f} ms/frame; "
                   f"defaults: accuracy {run.baseline['accuracy']:.4f}, {reference_ms:.1f} ms/frame)")
-            print(f"saved {os.path.relpath(OUT, h.REPO)} and {os.path.relpath(TOP, h.REPO)}")
+            print(f"saved {os.path.relpath(OUT, h.REPO)} and the run's best and top five in "
+                  f"{os.path.relpath(folder, h.REPO)}")
             for k, v in best["changes"].items():
                 print(f"  {k}: {v['from']} -> {v['to']}")
-            print("training scenarios:")
+            print("training clips:")
             show(best["rows"], best["accuracy"])
-            print("holdout scenarios (best, then defaults):")
-            run.holdout_results[best["n"]] = dict(zip(("value", "rows"), evaluate(pool, holdout, best["values"])))
-            run.holdout_results["default"] = dict(zip(("value", "rows"), evaluate(pool, holdout, BlobSettings().to_dict())))
+            run.holdout_results[best["n"]] = score_parts(pool, holdout, best["values"])
+            run.holdout_results["default"] = score_parts(pool, holdout, defaults)
+            for part in holdout:
+                b, d = run.holdout_results[best["n"]]["parts"][part], run.holdout_results["default"]["parts"][part]
+                print(f"holdout, {PARTS[part]}: defaults {d:.4f} -> best {b:.4f}")
             show(run.holdout_results[best["n"]]["rows"], run.holdout_results[best["n"]]["value"])
-            show(run.holdout_results["default"]["rows"], run.holdout_results["default"]["value"])
+            with open(os.path.join(folder, "holdout.json"), "w") as f:
+                json.dump({k: {"value": v["value"], "parts": v["parts"]} for k, v in
+                           {"best": run.holdout_results[best["n"]], "default": run.holdout_results["default"]}.items()},
+                          f, indent=1)
             run.show_holdout = True
         run.finished = True
         with open(STATE, "w") as f:
@@ -699,12 +854,12 @@ td.n { text-align: right; font-family: var(--mono); font-variant-numeric: tabula
   <div class="cols">
     <div class="panel"><h2 id="best-title">Best settings</h2><div class="scroll"><table id="changes"></table></div>
       <p class="note">Only settings that differ from the defaults are listed.</p></div>
-    <div class="panel"><h2>Training scenarios: defaults → best</h2><div class="scroll"><table id="train"></table></div></div>
+    <div class="panel"><h2>Training clips: defaults → best</h2><div class="scroll"><table id="train"></table></div></div>
     <div class="panel"><h2>Top five trials</h2><div class="scroll"><table id="top"></table></div>
       <p class="note">Speed is the reward for being faster than the defaults (negative: slower). Regression is the extra penalty for scenarios that do worse than with the defaults.</p></div>
     <div class="panel"><h2>Which settings matter</h2><div class="scroll"><table id="importance"></table></div>
       <p class="note">Optuna's estimate of how much of the score's spread each setting explains.</p></div>
-    <div class="panel" id="hold-panel" hidden><h2>Holdout scenarios: defaults → best</h2><div class="scroll"><table id="hold"></table></div>
+    <div class="panel" id="hold-panel" hidden><h2>Holdout clips: defaults → best</h2><div class="scroll"><table id="hold"></table></div>
       <p class="note" id="hold-note"></p></div>
   </div>
 </div>
@@ -726,7 +881,7 @@ const back = r => r.recovery == null ? '' : r.recovery < 0 ? 'never' : r.recover
 function rowsTable(el, before, after) {
   let h = '<tr><th>Scenario</th><th class="n">On ball</th><th class="n">Median px</th><th class="n">Back</th><th>Target</th></tr>';
   after.forEach((r, i) => {
-    const b = before ? before.find(x => x.name === r.name) : null;
+    const b = before ? before.find(x => x.clip === r.clip) : null;
     const d = b ? r.on_ball - b.on_ball : 0;
     h += '<tr><td>' + r.name + '</td><td class="n">' + (b ? Math.round(b.on_ball * 100) + '% → ' : '') +
       '<span class="' + (d > 0.005 ? 'up' : d < -0.005 ? 'down' : '') + '">' + Math.round(r.on_ball * 100) + '%</span></td>' +
@@ -813,10 +968,14 @@ function render() {
   $('hold-panel').hidden = !S.show_holdout;
   if (S.show_holdout) {
     const hb = S.best && S.holdout[String(S.best.n)], hd = S.holdout['default'];
-    $('hold-note').textContent = (hb && hd) ? 'Holdout score: defaults ' + fmt(hd.value) + ' → best ' + fmt(hb.value) + '. These scenarios never take part in the search.'
-      : 'Scoring the holdout scenarios…';
+    const P = S.holdout_parts || {};
+    $('hold-note').innerHTML = (hb && hd)
+      ? 'Holdout score, defaults → best: <b>' + fmt(hd.value) + ' → ' + fmt(hb.value) + '</b>' +
+        Object.entries(P).map(([k, p]) => ' · ' + p.label + ' (' + p.count + '): ' + fmt(hd.parts[k]) + ' → ' + fmt(hb.parts[k])).join('') +
+        '. These clips never take part in the search.'
+      : 'Scoring the holdout clips…';
     if (hb) rowsTable($('hold'), hd ? hd.rows : null, hb.rows);
-    else $('hold').innerHTML = '<tr><td>' + S.holdout_names.join(', ') + '</td></tr>';
+    else $('hold').innerHTML = '<tr><td>' + Object.values(P).map(p => p.count + ' ' + p.label).join(', ') + '</td></tr>';
   }
   plot();
 }

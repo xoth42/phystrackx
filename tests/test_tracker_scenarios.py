@@ -37,6 +37,36 @@ SHIFT = 4  # cv2 draws at 1/16 pixel with this shift, so the true centre is not 
 
 
 # -------------------------------------------------------------------------------------------------
+class Jitter:
+    """Random variation for another draw of the same scenarios (sizes, paths, timings, dirt,
+    noise), to tune and test for robustness rather than for one picture. Draw 0 returns every
+    value unchanged, so the tests always see the same scenarios."""
+
+    def __init__(self, draw: int = 0):
+        self.draw = draw
+        self.rng = np.random.default_rng(10007 * draw + 1) if draw else None
+
+    def scale(self, value, rel):
+        """value times a random factor within 1 +- rel."""
+        return value if not self.draw else value * float(self.rng.uniform(1 - rel, 1 + rel))
+
+    def shift(self, value, by):
+        """value plus a random amount within +- by (each element, for a tuple)."""
+        if not self.draw:
+            return value
+        if isinstance(value, tuple):
+            return tuple(v + float(self.rng.uniform(-by, by)) for v in value)
+        return value + float(self.rng.uniform(-by, by))
+
+    def int(self, value, by):
+        return value if not self.draw else max(1, int(value + self.rng.integers(-by, by + 1)))
+
+    def seed(self, value):
+        """A seed for the draw's own dirt, noise and shapes."""
+        return value + 7919 * self.draw
+
+
+# -------------------------------------------------------------------------------------------------
 # Backgrounds
 def bg_white(rng):
     return np.full((H, W, 3), 255, np.uint8)
@@ -278,33 +308,49 @@ def _shapes(rng, n, speed, colours, front=False, size=(14, 26)):
     return out
 
 
-def build_scenarios() -> list:
-    r = np.random.default_rng(7)
+def build_scenarios(draw: int = 0) -> list:
+    """The scenarios; `draw` above 0 gives a random variation of each (see Jitter)."""
+    j = Jitter(draw)
+    r = np.random.default_rng(j.seed(7))
     bright = [(60, 160, 40), (200, 90, 30), (30, 190, 230), (150, 40, 150)]
+
+    def liss(speed):
+        return path_lissajous(j.scale(speed, 0.2), phase=j.shift((0.1, 0.35), 0.2))
+
+    def bounce(speed, rad):
+        return path_bounce(j.scale(speed, 0.2), start=j.shift((120.0, 90.0), 40),
+                           angle_deg=j.shift(33.0, 15), r=rad)
+
+    def size(v):
+        return j.scale(v, 0.15)
+
+    seed, noise = j.seed(1), (lambda v: j.scale(v, 0.3))
     return [
-        Scenario("white, clean", "easy", bg_white, path_lissajous(1.0), 14, *RED),
-        Scenario("white, small and fast", "easy", bg_white, path_bounce(9, r=7), 7, *RED),
-        Scenario("white, still shapes", "easy", bg_white, path_lissajous(1.0), 13, *RED,
-                 things=_shapes(r, 5, 0.0, bright)),
-        Scenario("paper wall, moving shapes", "medium", bg_paper, path_lissajous(1.2), 12, *RED,
-                 things=_shapes(r, 5, 2.5, bright), noise=2.0),
-        Scenario("paper wall, look-alike ball", "medium", bg_paper, path_lissajous(1.2), 12, *RED,
+        Scenario("white, clean", "easy", bg_white, liss(1.0), size(14), *RED, seed=seed),
+        Scenario("white, small and fast", "easy", bg_white, bounce(9, 7), size(7), *RED, seed=seed),
+        Scenario("white, still shapes", "easy", bg_white, liss(1.0), size(13), *RED,
+                 things=_shapes(r, 5, 0.0, bright), seed=seed),
+        Scenario("paper wall, moving shapes", "medium", bg_paper, liss(1.2), size(12), *RED,
+                 things=_shapes(r, 5, 2.5, bright), noise=noise(2.0), seed=seed),
+        Scenario("paper wall, look-alike ball", "medium", bg_paper, liss(1.2), size(12), *RED,
                  things=_decoys(2, RED[0], RED[1], 9, r, speed=2.5) + _shapes(r, 3, 2.0, bright),
-                 noise=2.0),
-        Scenario("noise background", "hard", bg_noise, path_lissajous(1.0), 13, *DARK,
-                 things=_shapes(r, 4, 2.5, bright), noise=3.0),
-        Scenario("camouflage background", "hard", bg_camo, path_lissajous(1.0), 14, *GREEN_CAMO,
-                 things=_shapes(r, 4, 2.5, [(60, 90, 70), (110, 150, 170), (40, 60, 40)]), noise=2.0),
-        Scenario("camouflage, fine pattern, look-alikes", "extreme", bg_camo_fine, path_lissajous(1.2), 12,
+                 noise=noise(2.0), seed=seed),
+        Scenario("noise background", "hard", bg_noise, liss(1.0), size(13), *DARK,
+                 things=_shapes(r, 4, 2.5, bright), noise=noise(3.0), seed=seed),
+        Scenario("camouflage background", "hard", bg_camo, liss(1.0), size(14), *GREEN_CAMO,
+                 things=_shapes(r, 4, 2.5, [(60, 90, 70), (110, 150, 170), (40, 60, 40)]),
+                 noise=noise(2.0), seed=seed),
+        Scenario("camouflage, fine pattern, look-alikes", "extreme", bg_camo_fine, liss(1.2), size(12),
                  *GREEN_CAMO,
                  things=_decoys(3, GREEN_CAMO[0], GREEN_CAMO[1], 12, r, speed=3.0),
-                 noise=3.0, flicker=4.0),
-        Scenario("camouflage, fast, occluders", "extreme", bg_camo, path_bounce(13, r=12), 12, *GREEN_CAMO,
+                 noise=noise(3.0), flicker=4.0, seed=seed),
+        Scenario("camouflage, fast, occluders", "extreme", bg_camo, bounce(13, 12), size(12), *GREEN_CAMO,
                  things=_decoys(2, GREEN_CAMO[0], GREEN_CAMO[1], 11, r, speed=3.0)
                  + _shapes(r, 3, 4.0, [(40, 60, 40), (104, 140, 150)], front=True, size=(20, 30)),
-                 noise=3.0, known_weak=True),
-        Scenario("dropped by a hand", "hard", bg_paper, path_drop_and_bounce(), 6, *DARK, hand=True,
-                 noise=2.0, known_weak=True),
+                 noise=noise(3.0), known_weak=True, seed=seed),
+        Scenario("dropped by a hand", "hard", bg_paper,
+                 path_drop_and_bounce(x=j.shift(330.0, 120), top=j.shift(70.0, 20)), size(6), *DARK,
+                 hand=True, noise=noise(2.0), known_weak=True, seed=seed),
     ]
 
 

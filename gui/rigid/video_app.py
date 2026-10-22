@@ -66,6 +66,8 @@ class Video:
         self.drawn = None      # The picture last drawn (BGR array)
         self._raw = None       # Last decoded frame and its index: panning and zooming do not
         self._raw_idx = None   # change the frame, so it is not decoded again
+        self._filtered = None  # The filtered frame and (index, filter, value) it was made from:
+        self._filtered_key = None  # zoom and pan redraw without filtering again
 
         tempdir = "temp"
         os.makedirs(tempdir, exist_ok=True)
@@ -133,7 +135,8 @@ class Video:
             on_progress (callable, optional): Receives proxy encoding progress (0.0 to 1.0).
         """
         self.rigid.release()
-        self._raw = self._raw_idx = None  # A new clip: the cached frame is no longer valid
+        # A new clip: the cached frames are no longer valid
+        self._raw = self._raw_idx = self._filtered = self._filtered_key = None
 
         if istrim:
             self.logger.info("Loading trim video")
@@ -153,7 +156,7 @@ class Video:
 
         # Until the proxy was ready the reader pointed at the source file, so a frame drawn in
         # the meantime would be cached at the source's size
-        self._raw = self._raw_idx = None
+        self._raw = self._raw_idx = self._filtered = self._filtered_key = None
         self.logger.info(f"Video loaded: {videopath}, Frame count: {self.fcount}, FPS: {self.fps},"
                          f"Width: {self.crop.cropwidth}, Height: {self.crop.cropheight}")
 
@@ -183,8 +186,12 @@ class Video:
         if self._raw is None or self._raw_idx != idx:
             self._raw = self.rigid.frame(index=self.frameidx)
             self._raw_idx = idx
-        frame = self.filters.apply_filter(self._raw)
-        self.frame = self.crop.apply_crop(frame)
+        flt = self.filters.snapshot()
+        key = (idx, flt.ftype, flt.value)
+        if self._filtered is None or self._filtered_key != key:
+            self._filtered = flt.apply_filter(self._raw)
+            self._filtered_key = key
+        self.frame = self.crop.apply_crop(self._filtered)
 
         if view is not None:
             view.configure(view.origin, (self.frame.shape[1], self.frame.shape[0]))

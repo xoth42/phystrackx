@@ -78,7 +78,7 @@ class RigidApp(App):
         self.saved_data: dict | None = None  # {"dir": folder, "files": [CSV paths]} once saved
         self.loaded_data = None  # CsvData read from the project's last saved CSV
         self.pipeline_mgr.saver.on_saved = self._on_data_saved
-        self.seekbar = SeekBar(self.vidframe, self.vwidth, self.seekbarh, callback=self.updateframe)
+        self.seekbar = SeekBar(self.vidframe, self.vwidth, self.seekbarh, callback=self._scrub_soon)
         self.seekbar.set_trim_callback(self.trimvideo)
 
         # 2. Local Overlay Views
@@ -628,6 +628,20 @@ class RigidApp(App):
         self.view.fit = crop.fit
         self.videoapp.showframe(self.seekbar.idx, self.view)
         self.tpoints.drawpoints(self.seekbar.idx)
+
+    def _scrub_soon(self) -> None:
+        """The seek bar moved. A drag sends a motion event per pixel, and each frame costs a seek
+        and a repaint, so drawing each one makes the picture trail the pointer. Draws once the
+        queued motion is handled, at the bar's latest position (as _redraw_soon does for zoom)."""
+        if getattr(self, "_scrub_pending", False):
+            return
+        self._scrub_pending = True
+
+        def draw():
+            self._scrub_pending = False
+            self.updateframe()
+
+        self.root.after_idle(draw)
 
     def _on_view_change(self) -> None:
         """Zoom or pan changed: redraw the frame and every overlay at the new view."""
