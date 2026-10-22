@@ -44,10 +44,33 @@ A window with a left sidebar of buttons, the video view, and a seek bar.
   a re-encoded clip as in the Tk app.
 - **Place Axis**: click to place the origin. Drag a line to move the axes, drag the round handle
   at the end of the x axis to rotate them.
-- **Mark Object**: drag a box around each object; Escape when done.
-- **Track**: runs the parent's `MLTracker` (NanoTrack, as the Tk app) from the current frame to the
-  end of the trim, on a worker thread with its own reader. The view follows live and scrubbing
-  stays free. Press again to stop.
+- **Mark Rectangle**: drag a box around each object; Escape when done. The object just marked is
+  selected, so D removes it at once (a quick redo).
+- **Fine-tuning a selection**: the selected object has a size line from its centre with a knob;
+  drag the knob (or press [ and ]) to make it bigger or smaller about its centre. Move (M) lets a
+  drag anywhere on the picture move it (a small ball's box is hard to grab); Escape or M ends it.
+- **Track**: first asks for the method (`phystrack_qt/track_methods.py`; Enter takes the one used
+  last): the whole-clip engine (recommended: reads the range, then picks the path over all of it;
+  gets through covers and dirty lenses), the blob tracker with or without the still background
+  (live), or NanoTrack (the neural model the Tk app uses), with options for the background, a
+  physics fit at the end, and correcting a shiny ball's centre from the selection (best with an
+  Auto Object outline, which the engines take as the selection). They are the parent's
+  (`experiments/rigid`: `cliptrack.py`, `blobtracker.py`, `mltracker.py`). It runs from the
+  current frame to the end of the trim, on a worker thread with its own reader; live methods are
+  followed in the view, and scrubbing stays free. Press again to stop. Only objects that are new,
+  moved or resized, or were tracked another way or over another range are tracked; the others keep
+  their tracks. The status bar's bar fills once over the whole run (every object and pass), and it
+  and the status say "frame n / last" of the whole video, as beside the seek bar. The centre option
+  fits a circle to the ball's outline on every frame (the parent's `ringfit.py`), as a shiny ball's
+  highlights, smeared by motion blur, pull a blob centre 1-3 px aside. The whole-clip method shows its
+  best path so far while it reads (it can still change), and reads the next frame on a second
+  thread while it works on the current one.
+- **Playback of a track**: a dot marks each object's tracked centre on the frame shown, and the
+  trail is bright up to it, so playing or scrubbing shows the track against the ball in the picture.
+- **Saving asks nothing**: Save Project, Export Data and a plot's Save (the button or the toolbar's)
+  write next to the video, named after it (`Air Trial 1.phystrack`, `Air Trial 1_data.csv`,
+  `Air Trial 1_object1_y.png` / `.csv` / `_fit.txt`), never over an earlier file (" 2" is added),
+  and the status bar shows the full path. Save Project As… still asks, for when another place is wanted.
 - **View**: pinch or Cmd+scroll to zoom, scroll to pan, double-click the picture to fit it.
 - **Seek**: drag the bar, or Left and Right arrows for one frame.
 

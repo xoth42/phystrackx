@@ -27,6 +27,7 @@ from PySide6.QtWidgets import QApplication  # noqa: E402
 
 WORK = os.path.join(tempfile.gettempdir(), "phystrack_qt_tests")
 os.makedirs(WORK, exist_ok=True)
+os.environ["PHYSTRACK_QT_HOME"] = os.path.join(WORK, "home")  # The recent list stays out of the real one
 
 _failures: list[str] = []
 
@@ -39,6 +40,10 @@ def window():
     """A main window with its proxy cache in the test folder."""
     from phystrack_qt.main_window import MainWindow
     w = MainWindow(cache_dir=os.path.join(WORK, "cache"))
+    # Track runs NanoTrack straight away, with no method dialog (test_tracking covers the dialog
+    # and the other methods)
+    w.ask_track_method = False
+    w.track_method = "nanotrack"
     w.resize(1280, 800)
     w.show()
     pump(timeout=0.2)

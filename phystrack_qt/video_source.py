@@ -19,8 +19,13 @@ from PySide6.QtCore import QObject, Signal
 
 from media import VideoReader, proxyvideo
 from media.proxyvideo import _cache_key
+from .timing import Timing, probe_timing
 
 PROXY_MAX_SIDE = 1600  # The proxy's long side. The view scales it on the GPU, so this sets detail
+# A frame up to this many ahead is reached by reading forward rather than seeking. On the proxy a
+# frame read forward (grab, not converted) costs about 0.7 ms and a seek about 40 ms however near,
+# so reading forward wins across a whole keyframe interval (the proxy's is 30 frames)
+MAX_READ_AHEAD = 30
 
 
 class VideoSource(QObject):
@@ -36,6 +41,7 @@ class VideoSource(QObject):
         self.path: str | None = None
         self.proxy_path: str | None = None
         self.size = (0, 0)          # Frame size in proxy pixels (width, height)
+        self.timing: Timing | None = None  # Read from the source file, so the proxy cannot change it
         self._from_source = False   # Frames come from the source (scaled) until the proxy exists
         self._job = 0               # Which load a finishing worker belongs to
         self._proxy_made.connect(self._use_proxy)  # Queued: runs on the UI thread
@@ -46,7 +52,19 @@ class VideoSource(QObject):
 
     @property
     def fps(self) -> float:
-        return self.reader.fps if self.reader else 0
+        """The container rate, exact (playback follows it)."""
+        return self.timing.container_fps if self.timing else 0
+
+    @property
+    def measure_fps(self) -> float:
+        """The rate that turns a frame into real time: the capture rate when the file has one."""
+        return self.timing.measure_fps if self.timing else 0
+
+    @property
+    def fps_text(self) -> str:
+        if self.timing and self.timing.capture_fps:
+            return f"{self.fps:.2f} fps, recorded at {self.timing.capture_fps:g} fps"
+        return f"{self.fps:.2f} fps"
 
     @property
     def has_proxy(self) -> bool:
@@ -70,6 +88,9 @@ class VideoSource(QObject):
         width = max(2, round(w * scale / 2) * 2)  # Even, as libx264 needs
         self.size = (width, round(h * width / w))
 
+        # The container rate from the file's own report (exact, not rounded down as VideoReader.fps
+        # is); OpenCV's unrounded value if ffmpeg cannot be run
+        self.timing = probe_timing(path) or Timing(float(reader._reader.get(cv2.CAP_PROP_FPS)))
         if self.reader is not None:
             self.reader.release()
         self.path, self.reader, self._from_source = path, reader, True
@@ -107,7 +128,19 @@ class VideoSource(QObject):
 
     def frame(self, index: int):
         """The frame at index (BGR), in proxy pixels."""
+        self._read_forward_to(index)
         frame = self.reader.read(index)
         if self._from_source:
             frame = cv2.resize(frame, self.size, interpolation=cv2.INTER_AREA)
         return frame
+
+    def _read_forward_to(self, index: int) -> None:
+        """Skips the frames before index by reading them, when index is a little ahead of the next
+        frame, so that reading index needs no seek. Playback skips frames whenever one is slow to
+        draw; seeking for each skip made the next frame slower still, and playback fell to about a
+        third of its speed. (media.VideoReader, shared with the Tk app, seeks for any skip.)"""
+        reader = self.reader
+        if reader._next is None or not 0 < index - reader._next <= MAX_READ_AHEAD:
+            return
+        while reader._next < index and reader._reader.grab():
+            reader._next += 1

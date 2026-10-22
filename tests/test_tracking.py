@@ -112,6 +112,77 @@ def test_track_thrown_ball() -> None:
     h.check("scrubbing shows the tracked box for that frame",
             np.hypot(r.center().x() - gx, r.center().y() - gy) < 3,
             f"({r.center().x():.1f}, {r.center().y():.1f}) vs ({gx:.1f}, {gy:.1f})")
+    w._dirty = False  # Closing would ask about unsaved changes, and a test has nobody to answer
+    w.close()
+
+
+def _errors(obj) -> np.ndarray:
+    out = []
+    for i in range(FRAMES):
+        c = obj.centre(i)
+        if c is not None:
+            gx, gy = ball_path(i)
+            out.append(np.hypot(c[0] - gx, c[1] - gy))
+    return np.array(out)
+
+
+def test_track_methods() -> None:
+    """Every method Track offers follows the thrown ball; the dialog picks the method."""
+    from PySide6.QtCore import QTimer
+    from PySide6.QtWidgets import QApplication
+    from phystrack_qt.track_methods import METHODS, TrackDialog
+    w = h.window()
+    w.load_video(make_clip())
+    h.check("proxy is made", h.pump(lambda: w.source.has_proxy, 60))
+    x0, y0 = ball_path(0)
+    pad = RADIUS + 6
+    w.start_mark()
+    drag(w.view, (x0 - pad, y0 - pad), (x0 + pad, y0 + pad))
+    h.pump(timeout=0.1)
+    QTest.keyClick(w, Qt.Key.Key_Escape)
+    obj = w.objects[0]
+    for m in METHODS:
+        w.seek.setValue(0)
+        h.pump(timeout=0.1)
+        t0 = time.perf_counter()
+        w.start_track(m.key)
+        h.check(f"{m.key}: tracking finishes", h.pump(lambda: w.job is None, 120))
+        took = time.perf_counter() - t0
+        errors = _errors(obj)
+        print(f"    {m.key}: {len(errors)} frames in {took:.2f} s, median error "
+              f"{np.median(errors):.2f} px, worst {errors.max():.2f} px")
+        h.check(f"{m.key}: every frame has a position", len(errors) == FRAMES, f"{len(errors)} of {FRAMES}")
+        h.check(f"{m.key}: median error under 2 px", np.median(errors) < 2.0, f"{np.median(errors):.2f}")
+        h.check(f"{m.key}: worst error under 5 px", errors.max() < 5.0, f"{errors.max():.2f}")
+
+    # The dialog: Track asks first; the chosen method runs and is remembered
+    w.ask_track_method = True
+    w.seek.setValue(0)
+    h.pump(timeout=0.1)
+    seen = {}
+
+    def answer():
+        dialog = QApplication.activeModalWidget()
+        if not isinstance(dialog, TrackDialog):
+            QTimer.singleShot(50, answer)
+            return
+        seen["methods"] = list(dialog.radios)
+        seen["first"] = dialog.method
+        dialog.radios["blob_background"].setChecked(True)
+        seen["background on"] = dialog.checks["background"].isChecked()
+        dialog.track_btn.click()
+
+    QTimer.singleShot(50, answer)
+    w.toggle_track()
+    h.check("the dialog lists every method", seen.get("methods") == [m.key for m in METHODS], str(seen))
+    h.check("the dialog offers the last method used first", seen.get("first") == "nanotrack", str(seen))
+    h.check("the blob method's background option is on by default", seen.get("background on") is True)
+    h.check("the chosen method runs", h.pump(lambda: w.job is None, 120) and w.track_method == "blob_background",
+            w.track_method)
+    h.check("the run is on the ball", np.median(_errors(obj)) < 2.0)
+    h.check("the status names the method", "Blob tracker with still background" in w.statusBar().currentMessage(),
+            w.statusBar().currentMessage())
+    w._dirty = False
     w.close()
 
 
@@ -119,4 +190,6 @@ if __name__ == "__main__":
     h.app()
     print("test_track_thrown_ball")
     test_track_thrown_ball()
+    print("test_track_methods")
+    test_track_methods()
     h.finish()
