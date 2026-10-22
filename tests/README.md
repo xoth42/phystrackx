@@ -36,10 +36,22 @@ kept and named in the output.
 | `test_tracking` | yes | live frames, refused second run, stop keeps results, manual positions |
 | `test_overlay_geometry` | yes | a synthetic frame is drawn at many zooms, pans, window sizes and frame offsets, through both the proxy and the full-resolution path; each square's drawn centre must be within 1 px of where the overlay transform puts it |
 | `test_overlay_alignment` | yes | the same check on a real rotated clip with two markers (the markers' positions are only known to about half a frame pixel, so it catches gross scale and offset errors) |
-| `test_tracker_scenarios` | no | ten synthetic scenarios from easy (white screen) to extreme (camouflage with look-alikes and occluders), plus a hand drop; the circle-selected ball is tracked and compared with its true path. Two are marked as known weaknesses with a floor. `uv run python -m tests.benchmark_report` writes a page with a player and error chart for each |
+| `test_tracker_scenarios` | no | ten synthetic scenarios from easy (white screen) to extreme (camouflage with look-alikes and occluders), plus a hand drop; the circle-selected ball is tracked and compared with its true path. Two are marked as known weaknesses with a floor. The engine scored is NanoTrack unless `PHYSTRACK_TRACKER` names another (`vittrack`, `trackpy`) |
+| `test_tracker_muddy` | no | fifteen harder scenarios: a chrome ball released from rest into a glass tube through clean, greasy, wet and filthy lenses, a tiny ball, and covers (a slab, a bar, a black glove, a second ball, a clamp arm) that hide it for a while. Scores count visible frames, plus frames to be back on the ball after a cover. Expected to fail with NanoTrack (the default engine; `PHYSTRACK_TRACKER` as above) |
 | `test_start_view` | yes | a rotated phone-style clip opens whole: the drawn picture lies inside the video area, fills one side, and is the frame scaled by the view fit |
 | `test_window_features` | yes | File menu and Open Recent; Clear Data; dark text on the cyan strips; resizing the window re-fits the picture and keeps the ruler on it; a .phystrack given as --video opens as a project |
 | `test_tracker_accuracy` | no | tracker follows a synthetic ball with known path; pipeline keeps points on the ball at native size, when downscaled, and when tracking the full-resolution copy at a downscaled view; full-size region maps the crop |
+
+Tools beside the tests (not run by `run_all`):
+- `uv run python -m tests.benchmark_report` writes `temp/benchmark_report.html`: every scenario
+  of both benchmarks with a player, the engines' positions, an error chart (hidden frames shaded)
+  and the scores, NanoTrack beside the trackpy blob tracker (`--engines`, `--settings`).
+- `uv run python -m tests.tune_tracker` searches the blob tracker's settings with Optuna on 20 of
+  the 25 scenarios (5 are held out) and opens a live page (http://127.0.0.1:8765) with a plot of
+  every trial and Pause, Stop and Show holdout buttons. The best settings go to
+  `temp/tuned_blob_settings.json`. `--score` only scores the defaults (or `--settings FILE`);
+  `--minutes N` sets a time limit; `--resume` continues the last study. Frames are drawn once into
+  `temp/tracker_frames`.
 
 ## Notes
 

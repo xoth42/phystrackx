@@ -78,7 +78,51 @@
 - Starting any tool cancels the one before it.
 
 ## Open
-- **Tracker weaknesses found by the benchmark:** a small, fast ball (the dropped ball, up to about
+- **Background removal (plan, for the blob tracker).** The camera is fixed in almost every lab
+  clip, so everything that does not move (lens dirt, the tube, the clamp stand, the ruler) can be
+  removed before looking for the ball:
+  1. Before tracking, on the worker thread: take about 30 frames spread over the trimmed clip (at
+     proxy size), and store their per-pixel median as the background (a fraction of a second).
+  2. Add a `"foreground"` feature to `FEATURES` in `experiments/rigid/blobtracker.py`: the
+     difference from the background (largest over the colour channels, or Lab distance), blurred
+     like the contrast feature. A variant multiplies the contrast feature by it, so a blob counts
+     only where something has changed.
+  3. A ball at rest at the start is part of the median only if it stays put for more than half the
+     sampled frames. If it does, take the background at the selection from the frames where the ball
+     is far from it (known after a first pass), or fall back to the contrast feature there.
+  4. Lighting changes and flicker: scale each frame to the background's mean brightness first, or
+     keep a slowly updated running median.
+  5. A moving camera breaks it: check the background's shift (phase correlation) on a few frames,
+     and if it moves, stabilise first or turn the feature off.
+  6. Tune it with `tests/tune_tracker.py` (it is a setting, `feature`), and compare per scenario.
+     The muddy scenes (fixed lens dirt) should gain most; covers and look-alikes that move will not.
+- **Scaling with RAM and CPU (note, for when tracking gets too slow).** Today each frame is decoded
+  and then tracked on one thread, about 10 ms per frame per object, with objects in parallel
+  threads. With memory to spare:
+  - Decode the trimmed clip once into RAM (proxy size: 2 minutes at 30 fps, 640x480 grey is about
+    1.1 GB, colour 3.3 GB), in shared memory (`multiprocessing.shared_memory`) so worker
+    processes read it without copies. Re-tracking with other settings, or from a corrected frame,
+    then costs no decoding, and offline methods become possible (below).
+  - Prefetch: decode on its own thread or process into a queue, so the tracker never waits.
+  - Frame-parallel finding: candidate blobs in whole frames are independent per frame, so they can
+    be found in parallel processes (100–500 ms per whole frame / cores), then linked in one cheap
+    sequential pass (trackpy's batch-then-link mode). This also finds a ball lost far from its
+    prediction.
+  - Offline linking over the whole clip: with every frame's candidates in memory, pick the best
+    path over all frames at once (Viterbi or trackpy.link with a predictor), forward and backward
+    passes in parallel and merged. Gaps from covers are filled from both sides.
+  - Objects in processes instead of threads (no GIL), and several settings run side by side, with
+    the most confident path kept per stretch of frames.
+  - `trackpy.locate(engine="numba")` (needs numba) for faster blob finding.
+- **Blob tracker failures still open** (`tests/tune_tracker.py` lists them): see the scores under
+  "Last done". The search there (Optuna, 20 synthetic scenarios, 5 held out) can fit synthetic
+  footage, so check any tuned setting on the holdout and on real clips before trusting it. Its
+  score has no speed term yet: a tuned setting can be several times slower (a wider surround
+  means a bigger blurred window). Add a time budget to the score if that matters.
+- **Use the blob tracker in the app:** it has MLTracker's interface (`initialize_tracker`,
+  `update_tracker`, `score`), but `experiments/rigid/rigid.py` still creates NanoTrack trackers.
+  Add a tracker choice (blob tracker by default once it is checked on real footage).
+- **NanoTrack weaknesses found by the benchmark:** a small, fast ball (the dropped ball, up to about
   18 px per frame) is lost after the first bounce (first miss at frame 39), and a fast ball on
   camouflage is lost when large shapes pass in front of it (frame 109). Both are marked
   `known_weak` in `tests/test_tracker_scenarios.py` with a floor. Try the Segment Anything assist

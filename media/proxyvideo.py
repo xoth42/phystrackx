@@ -50,6 +50,28 @@ def source_is_plain(videopath: str) -> bool:
     return width % 2 == 0 and height % 2 == 0
 
 
+def display_size(videopath: str) -> Optional[tuple[int, int]]:
+    """
+    The video's width and height as it is shown: a 90 or 270 degree rotation in the file's metadata
+    swaps the stored ones. Read from ffmpeg's own report. None when it cannot be read.
+    """
+    try:
+        ffmpeg = find_ffmpeg()
+        report = subprocess.run([ffmpeg, "-hide_banner", "-i", videopath], capture_output=True,
+                                text=True).stderr
+    except (FileNotFoundError, OSError):
+        return None
+    match = re.search(r"Stream #\d+:\d+.*Video:.*?,\s*(\d+)x(\d+)", report)
+    if not match:
+        return None
+    width, height = int(match.group(1)), int(match.group(2))
+    turn = re.search(r"rotation of (-?\d+(?:\.\d+)?) degrees", report) or \
+        re.search(r"\brotate\s*:\s*(-?\d+)", report)
+    if turn and round(abs(float(turn.group(1)))) % 180 == 90:
+        width, height = height, width
+    return width, height
+
+
 def proxyvideo(videopath: str, width: int = 1000, height: int = -2,
                writepath: Optional[str] = None, overwrite: bool = False,
                on_progress: Optional[Callable[[float], None]] = None,

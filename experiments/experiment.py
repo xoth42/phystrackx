@@ -19,7 +19,7 @@ import numpy as np
 
 from media.videoreader import VideoReader
 from media import proxyvideo, trimvideo
-from media.proxyvideo import source_is_plain
+from media.proxyvideo import source_is_plain, display_size
 
 
 # -------------------------------------------------------------------------------------------------
@@ -106,7 +106,10 @@ class Experiment:
         """
         Resize dimensions to fit inside the viewer while maintaining aspect ratio.
         """
-        ratio = self.fwidth / self.fheight
+        # The proxy is scaled from the video as it is shown, so the ratio is the shown one: a
+        # phone video's rotation is metadata that OpenCV does not apply to the stored frames
+        shown = display_size(self.videopath) or (self.fwidth, self.fheight)
+        ratio = shown[0] / shown[1]
         self.fheight = self.vheight
         self.fwidth = floor(self.fheight * ratio)
 

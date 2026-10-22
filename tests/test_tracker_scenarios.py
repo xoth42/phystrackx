@@ -334,16 +334,16 @@ ENGINES = ("nanotrack", "vittrack", "trackpy")
 ENGINE = os.environ.get("PHYSTRACK_TRACKER", "nanotrack")  # The engine the tests score
 
 
-def make_tracker(engine: str):
+def make_tracker(engine: str, settings=None):
     if engine == "trackpy":
-        return BlobTracker()
+        return BlobTracker(settings)
     return MLTracker(engine)
 
 
-def trace(scn: Scenario, engine: str = None) -> Trace:
+def trace(scn: Scenario, engine: str = None, settings=None) -> Trace:
     """Selects the ball on frame 0 with its circle's bounding square, then tracks it. Times only
-    the tracker's own work (drawing the frames is not counted)."""
-    tracker = make_tracker(engine or ENGINE)
+    the tracker's own work (drawing the frames is not counted). `settings` are the blob tracker's."""
+    tracker = make_tracker(engine or ENGINE, settings)
     x0, y0 = scn.truth(0)
     r = int(round(scn.radius))
     selection = PixelRect(int(round(x0)) - r, int(round(y0)) - r, 2 * r, 2 * r)
