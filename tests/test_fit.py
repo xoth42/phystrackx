@@ -14,7 +14,7 @@ h.setup_env()
 import matplotlib  # noqa: E402
 matplotlib.use("Agg")  # The plots are drawn to nothing: no windows open
 
-from gui.components.plot.fit import (best_period, damped, fit_damped,  # noqa: E402
+from core.fit import (best_period, damped, fit_damped,  # noqa: E402
                                      peak_periods)
 
 A, GAMMA, OMEGA, PHI, C = 80.0, 0.15, 1.2, 0.7, 120.0
@@ -138,7 +138,7 @@ def test_distance_r_is_csv_column_and_plot():
 
 def test_linear_drift_model_recovers_the_slope():
     """Oscillation settling onto a sloped line: the drift model finds the slope and fits better."""
-    from gui.components.plot.fit import fit_model
+    from core.fit import fit_model
     t, y = _series(noise=0.5)
     slope = 0.4
     y = y + slope * t
@@ -156,7 +156,7 @@ def test_plot_fit_type_switch():
     """The fit-type buttons on the plot switch between the plain and the drift model."""
     import matplotlib.pyplot as plt
     from gui.components.plot.plot import Plot
-    from gui.components.plot.fit import MODELS
+    from core.fit import MODELS
 
     t, y = _series(noise=0.5, n=600)
     y = y + 0.3 * t
@@ -216,7 +216,7 @@ def test_plot_slider_updates_the_fit():
 def test_quadratic_drag_recovers_the_parameters():
     """Data from the quadratic-drag equation: the drag model must recover omega and the drag k."""
     import time
-    from gui.components.plot.fit import drag, fit_model
+    from core.fit import drag, fit_model
     t = np.arange(900) / 30
     y = drag(t, 60.0, 0.0, 1.2, 0.02, 120.0)
     y = y + np.random.default_rng(3).normal(0, 0.3, t.size)
@@ -233,7 +233,7 @@ def test_quadratic_drag_recovers_the_parameters():
 
 
 def test_quadratic_drag_with_drift_recovers_the_slope():
-    from gui.components.plot.fit import drag_linear, fit_model
+    from core.fit import drag_linear, fit_model
     t = np.arange(900) / 30
     y = drag_linear(t, 60.0, 0.0, 1.2, 0.02, 120.0, 0.4)
     y = y + np.random.default_rng(4).normal(0, 0.3, t.size)
@@ -250,7 +250,7 @@ def test_drag_fit_on_damped_data_is_quick_and_stoppable():
     distance): the drag fits took 87 s and 12 s here, which froze the plot. They now start from the
     damped fit, so each takes about a second; and `stop` abandons a fit part-way."""
     import time
-    from gui.components.plot.fit import FitStopped, damped_linear, fit_model
+    from core.fit import FitStopped, damped_linear, fit_model
     t = np.arange(10.59, 30.69, 1 / 30)
     y = damped_linear(t - t[0], 55.0, 0.5, 1.34, 0.0, 20.0, -0.5)
     y = y + np.random.default_rng(0).normal(0, 0.3, t.size)
@@ -275,7 +275,7 @@ def test_drag_fit_on_damped_data_is_quick_and_stoppable():
 def test_plot_offers_the_drag_models():
     import matplotlib.pyplot as plt
     from gui.components.plot.plot import Plot
-    from gui.components.plot.fit import MODELS
+    from core.fit import MODELS
 
     class _Data:
         pass
@@ -304,7 +304,7 @@ def test_new_models_recover_their_parameters():
     """Data made from each of the newer models: the fit of that model recovers its own parameters
     (the period, and the term the model adds), well within a few seconds."""
     import time
-    from gui.components.plot.fit import MODELS, fit_model
+    from core.fit import MODELS, fit_model
     t = np.arange(600) / 30
     rng = np.random.default_rng(5)
     cases = [
@@ -330,7 +330,7 @@ def test_new_models_recover_their_parameters():
 
 
 def test_param_lines_cover_every_model():
-    from gui.components.plot.fit import MODELS, FitResult, param_lines
+    from core.fit import MODELS, FitResult, param_lines
     for key, spec in MODELS.items():
         fit = FitResult(ok=True, model=key, params={n: 1.0 for n in spec.names},
                         errors={n: 0.1 for n in spec.names}, tau=1.0)
@@ -341,7 +341,7 @@ def test_param_lines_cover_every_model():
 
 def test_initial_drop_is_high_to_first_low():
     """A motion that starts high and falls: the drop runs from the first high to the first low."""
-    from gui.components.plot.fit import initial_drop
+    from core.fit import initial_drop
     t = np.arange(0, 6, 1 / 30)
     y = 50 + 40 * np.cos(2 * math.pi * 0.5 * t)  # Starts at 90 (high), first low at t = 1 s, value 10
     drop = initial_drop(t, y)
@@ -358,7 +358,7 @@ def test_initial_drop_from_a_rest():
     """The object rests at the top (with a little tracking jitter) before it is let go, as in Air
     Trial 4: the drop runs from the resting place to the first low. It used to find no start
     (find_peaks never counts the first sample) and give up."""
-    from gui.components.plot.fit import initial_drop
+    from core.fit import initial_drop
     t = np.arange(0, 20, 1 / 30)
     falling = t >= 0.5
     y = np.full(t.size, 71.2)

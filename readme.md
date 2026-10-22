@@ -62,8 +62,10 @@ pip install -r requirements.txt
 ### 3. Run the App
 
 ```bash
-python phystrackx.py
+python tk/phystrackx.py
 ```
+
+The Qt version (a rewrite in progress) is in `qt/`; see `qt/README.md`.
 
 ### 💾 Windows Executable
 

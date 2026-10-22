@@ -9,6 +9,10 @@ Author: Isam Balghari
 import argparse
 import os
 import signal
+import sys
+
+# core and media are shared with the Qt app, so they live at the repo root, beside this folder
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 import customtkinter as ctk
 from gui.menu import MenuScreen

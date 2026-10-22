@@ -17,7 +17,7 @@ from matplotlib.widgets import Button, RadioButtons, RangeSlider
 from gui.components.checkbox import Checkbox
 from .plottype import PlotType
 from .datamanager import DataManager
-from .fit import (DEFAULT_MODEL, MODELS, best_period, fit_model, initial_drop, param_lines,
+from core.fit import (DEFAULT_MODEL, MODELS, best_period, fit_model, initial_drop, param_lines,
                   peak_periods)
 
 

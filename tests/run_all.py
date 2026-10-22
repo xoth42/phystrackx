@@ -27,12 +27,13 @@ from concurrent.futures import ThreadPoolExecutor
 from tests import harness
 
 
-def run_module(name: str) -> dict:
-    """Runs one test module in its own process and folder. Returns its exit code and output."""
+def run_module(name: str, module: str) -> dict:
+    """Runs one test module (a dotted name such as tests.test_fit) in its own process and folder.
+    Returns its exit code and output."""
     run_dir = tempfile.mkdtemp(prefix=f"phystrack_{name}_")
     env = dict(os.environ, PHYSTRACK_TEST_RUN_DIR=run_dir)
     started = time.time()
-    proc = subprocess.run([sys.executable, "-m", f"tests.{name}"], cwd=harness.REPO, env=env,
+    proc = subprocess.run([sys.executable, "-m", module], cwd=harness.REPO, env=env,
                           capture_output=True, text=True)
     seconds = time.time() - started
     if proc.returncode == 0:
@@ -51,14 +52,19 @@ def main() -> None:
     args = parser.parse_args()
 
     harness.setup_env()
-    names = sorted(os.path.splitext(os.path.basename(p))[0]
-                   for p in glob.glob(os.path.join(harness.TESTS_DIR, "test_*.py")))
+    # The shared tests, and the Tk app's tests (tk/tests), each run as a module of its own
+    modules = {}
+    for folder, package in ((harness.TESTS_DIR, "tests"), (os.path.join(harness.REPO, "tk", "tests"), "tk.tests")):
+        for p in glob.glob(os.path.join(folder, "test_*.py")):
+            name = os.path.splitext(os.path.basename(p))[0]
+            modules[name] = f"{package}.{name}"
+    names = sorted(modules)
     if args.modules:
         names = [n for n in names if n in args.modules]
 
     results = {}
     with ThreadPoolExecutor(max_workers=max(1, args.jobs)) as pool:
-        futures = {name: pool.submit(run_module, name) for name in names}
+        futures = {name: pool.submit(run_module, name, modules[name]) for name in names}
         for name in names:  # Printed in name order, each as it is ready
             result = futures[name].result()
             results[name] = result

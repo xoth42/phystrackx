@@ -18,8 +18,10 @@ import traceback
 
 TESTS_DIR = os.path.dirname(os.path.abspath(__file__))
 REPO = os.path.abspath(os.path.join(TESTS_DIR, os.pardir))
-if REPO not in sys.path:
-    sys.path.insert(0, REPO)
+TK = os.path.join(REPO, "tk")   # The Tk app's package (gui) lives here, beside the shared code
+for path in (REPO, TK):
+    if path not in sys.path:
+        sys.path.insert(0, path)
 
 # run_all gives each module its own run folder, so parallel modules do not share clips, proxies or
 # logs. Run on its own, a module uses the shared folder.

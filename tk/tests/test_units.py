@@ -31,7 +31,7 @@ def test_parse_length_reads_value_and_unit():
 def test_plot_labels_carry_the_unit():
     import matplotlib.pyplot as plt
     from gui.components.plot.plot import Plot, _summary
-    from gui.components.plot.fit import fit_model
+    from core.fit import fit_model
 
     t = np.arange(600) / 30
     y = 80 * np.exp(-0.1 * t) * np.cos(1.2 * t) + 120

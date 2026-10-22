@@ -10,16 +10,16 @@ from core import session  # noqa: E402
 
 
 def test_no_project_gives_no_command():
-    h.check("no project, nothing to resume", session.resume_command(None, "phystrackx.py") is None)
+    h.check("no project, nothing to resume", session.resume_command(None, "tk/phystrackx.py") is None)
 
 
 def test_command_reopens_the_project_with_spaces_quoted():
     project = "/Users/me/My Projects/Air Trial 1_20261019.phystrack"
-    cmd = session.resume_command(project, "phystrackx.py")
+    cmd = session.resume_command(project, "tk/phystrackx.py")
     import shlex
     h.check("command uses this Python", cmd.startswith(shlex.quote(sys.executable)), cmd)
     h.check("command runs the launcher with --project",
-            "--project" in cmd and os.path.abspath("phystrackx.py") in cmd, cmd)
+            "--project" in cmd and os.path.abspath("tk/phystrackx.py") in cmd, cmd)
     h.check("project path with spaces is quoted", f"'{project}'" in cmd, cmd)
 
 

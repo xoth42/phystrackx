@@ -3,7 +3,7 @@ project.py
 
 Reads and writes PhysTrackX project files. A project stores the video path, trim range,
 crop, axes, scale ruler, and tracked rectangles, so the setup can be reopened later with
-`phystrackx.py --project <file>`.
+`tk/phystrackx.py --project <file>`.
 
 Author: Isam Balghari
 """

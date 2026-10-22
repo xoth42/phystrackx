@@ -3,7 +3,7 @@ modelfiles.py
 
 Downloads and verifies the NanoTrack tracking models. Files are fetched from the upstream
 SiamTrackers repository (https://github.com/HonglinChu/SiamTrackers, NanoTrack/models/nanotrackv2)
-the first time tracking needs them, or on demand with `phystrackx.py --download-models`.
+the first time tracking needs them, or on demand with `tk/phystrackx.py --download-models`.
 
 Author: Isam Balghari
 """

@@ -1,4 +1,4 @@
-"""Command-line options of phystrackx.py (runs the entry point in a subprocess)."""
+"""Command-line options of tk/phystrackx.py (runs the entry point in a subprocess)."""
 
 import os
 import subprocess
@@ -9,7 +9,7 @@ h.setup_env()
 
 
 def _run(*args):
-    return subprocess.run([sys.executable, "phystrackx.py", *args], cwd=h.REPO,
+    return subprocess.run([sys.executable, "tk/phystrackx.py", *args], cwd=h.REPO,
                           capture_output=True, text=True, env=os.environ)
 
 
