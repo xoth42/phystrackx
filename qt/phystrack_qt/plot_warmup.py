@@ -32,7 +32,7 @@ def _warm() -> None:
 
         from .equations import equation_png
         from .parent_imports import import_light
-        fitting = import_light("gui.components.plot.fit")
+        fitting = import_light("core.fit")
         import matplotlib.widgets  # noqa: F401  (the fit panel's slider and menu)
 
         t = np.arange(120) / 30

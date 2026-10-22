@@ -18,7 +18,7 @@ from PySide6.QtWidgets import (QAbstractItemView, QHeaderView, QLabel, QTableWid
 from .equations import SCALE, equation_png
 from .parent_imports import import_light
 
-fitting = import_light("gui.components.plot.fit")
+fitting = import_light("core.fit")
 
 TEXT = "#111111"
 EQUATION = "#2a2a2a"   # Darker than the old light grey, which was hard to read

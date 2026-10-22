@@ -27,7 +27,7 @@ from matplotlib.widgets import RangeSlider
 
 from .parent_imports import import_light
 
-fitting = import_light("gui.components.plot.fit")
+fitting = import_light("core.fit")
 
 # Where the parts go (figure fractions): the plot, the slider under it, the results on the right
 PLOT_BOX = dict(left=0.09, right=0.60, bottom=0.25, top=0.9)

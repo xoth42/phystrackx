@@ -1,5 +1,5 @@
 """
-Imports modules from the parent (Tk) repo without running its package __init__ files.
+Imports modules from the repo root (core, media, experiments) without running their package __init__ files.
 
 The parent's experiments/__init__.py imports Rigid, which imports customtkinter, the Tk-bound GUI
 plugins (Crop, Filters) and OCR. The tracker itself (experiments/rigid/mltracker.py) needs only
@@ -20,6 +20,8 @@ def import_light(module: str):
     """Imports e.g. "experiments.rigid.mltracker" without running experiments/__init__.py or
     experiments/rigid/__init__.py. Packages that are already imported are left as they are."""
     parts = module.split(".")
+    if parts[0] == "core":   # core's __init__ is light (no GUI imports): a normal import, so `from core import ...` works
+        return importlib.import_module(module)
     for i in range(1, len(parts)):
         package = ".".join(parts[:i])
         if package not in sys.modules:
