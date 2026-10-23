@@ -56,8 +56,9 @@ jobs:
       - name: Python
         run: uv python install 3.12
 
+      # Before the project is built: its wheel includes these models, so the fetch cannot need the project
       - name: The models the app ships with
-        run: uv run python build.py models
+        run: uv run --no-project --with colorlog python build.py models
 
       - name: Install the command, as a user would
         run: |

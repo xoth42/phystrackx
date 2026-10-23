@@ -79,8 +79,9 @@ jobs:
           echo "APPIMAGETOOL=$RUNNER_TEMP/appimagetool" >> "$GITHUB_ENV"
           echo "APPIMAGE_EXTRACT_AND_RUN=1" >> "$GITHUB_ENV"
 
+      # Before the project is built: its wheel includes these models, so the fetch cannot need the project
       - name: The models the app ships with
-        run: uv run python build.py models
+        run: uv run --no-project --with colorlog python build.py models
 
       - name: Tests (the release is not built if they fail)
         run: uv run python build.py test
