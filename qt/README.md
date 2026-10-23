@@ -73,6 +73,18 @@ A window with a left sidebar of buttons, the video view, and a seek bar.
   and the status bar shows the full path. Save Project As… still asks, for when another place is wanted.
 - **View**: pinch or Cmd+scroll to zoom, scroll to pan, double-click the picture to fit it.
 - **Seek**: drag the bar, or Left and Right arrows for one frame.
+- **Correcting a track part-way**: stop, move the box back onto the object on that frame, and Track
+  again. The track before that frame is kept; only the part from there on is tracked again.
+- **History** (right bar, under the objects): every change is an event. Click one to go back to it;
+  the revert is logged too, so clicking a later event goes forward again. The agent's events are blue.
+- **Windows**: one trial per window, as many as wanted (File > New Window, Ctrl+N; or several files
+  on the command line). Each has an id (`w1`, `w2`...) in its title.
+- **Agent tools**: the app serves its tools to agents (MCP, or `phystrack_qt/agent/ptx.py` from a
+  shell) on 127.0.0.1. The usual request is `open` the next trial, then `run_recipe` from the one
+  done by hand. Space stops a working agent. See `../docs/AGENT_PLAN.md`.
+- **Assistant** (right bar, under the history): a local model (Ollama with `qwen3:4b-instruct` by
+  default, started when needed; any OpenAI-compatible runner through `PHYSTRACK_LLM_URL`) that uses
+  those tools: "do what I did in w1 on trials 2 to 4". Space stops it; Start goes on.
 
 Overlays are children of the picture item, so they are in frame pixels and follow zoom and pan
 without any coordinate code (in the Tk app, `ViewTransform` does this by hand).

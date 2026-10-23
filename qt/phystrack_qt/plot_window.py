@@ -37,15 +37,15 @@ KINDS = [
 DEFAULT_KINDS = ("r",)  # Distance from the origin against time: the one most often wanted first
 
 
-def choose_plots(parent: QWidget) -> list[str] | None:
-    """Asks which plots to show. None if the user cancels, else the chosen kinds."""
+def choose_plots(parent: QWidget, default=DEFAULT_KINDS) -> list[str] | None:
+    """Asks which plots to show (`default` ticked). None if the user cancels, else the chosen kinds."""
     dialog = QDialog(parent)
     dialog.setWindowTitle("Plots")
     layout = QVBoxLayout(dialog)
     boxes = {}
     for kind, label in KINDS:
         box = QCheckBox(label)
-        box.setChecked(kind in DEFAULT_KINDS)
+        box.setChecked(kind in default)
         layout.addWidget(box)
         boxes[kind] = box
     buttons = QDialogButtonBox(QDialogButtonBox.StandardButton.Ok |
@@ -96,6 +96,7 @@ def open_plots(number: int, t: np.ndarray, xy: np.ndarray, unit: str, kinds: lis
                             fit_time, columns)
         window.video_path, window.on_saved = video_path, on_saved
         window.file_suffix = f"_object{number}_{kind}"
+        window.kind, window.number = kind, number   # The main window's plot settings (history, tools)
         window.show()
         windows.append(window)
     return windows

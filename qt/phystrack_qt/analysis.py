@@ -159,6 +159,7 @@ class FitPanel:
         self.results = None
         self.slider = None
         self.on_fits = None
+        self.on_change = None   # Told when the model or range changes (the window's history)
         self._reported = None   # The fits last told to on_fits
         figure.set_size_inches(12, 6)
         figure.subplots_adjust(**PLOT_BOX)   # The panel's place is kept from the start
@@ -216,6 +217,36 @@ class FitPanel:
         self.model = key
         self._changed()
 
+    def set_range(self, lo: float, hi: float) -> None:
+        """The fit range from code (a tool, a revert): moves the slider if it is shown yet."""
+        lo, hi = max(lo, float(self.t[0])), min(hi, float(self.t[-1]))
+        if hi - lo < 0.05 * (float(self.t[-1]) - float(self.t[0])):
+            # Wholly outside the data, or too short to fit (e.g. a range copied from a longer
+            # trial): the whole data instead, rather than an inverted or empty range
+            lo, hi = float(self.t[0]), float(self.t[-1])
+        if self.slider is not None:
+            self.slider.set_val((lo, hi))   # Calls _changed
+        else:
+            self.range = (lo, hi)
+            self._changed()
+
+    def summary(self) -> dict:
+        """The fit shown, compactly (for the history and the agent tools)."""
+        out = {"model": self.model, "range": [round(v, 3) for v in self.range]}
+        fit = self.fitter.cached(*self.range, self.model)
+        if fit is not None and fit.ok:
+            tp, yp = self.fitter.data(*self.range)
+            period, perr, source = fitting.best_period(fit, fitting.peak_periods(tp, yp))
+            drop = fitting.initial_drop(tp, yp)
+            out.update(r2=round(fit.r2, 4), T=float(f"{period:.4g}"), dT=float(f"{perr:.2g}"))
+            if drop.ok:
+                out["drop"] = float(f"{drop.drop:.4g}")
+        elif fit is not None:
+            out["error"] = fit.message
+        else:
+            out["fitting"] = True
+        return out
+
     def _changed(self, _=None) -> None:
         """A new range or model: its fit at once if it was made already, else asked for."""
         if self.slider is not None:
@@ -227,6 +258,8 @@ class FitPanel:
             self.results.set_text(f"Fitting: {fitting.MODELS[self.model].label}...\n\n{self._shown}")
             self.figure.canvas.draw_idle()
         self._report()
+        if self.on_change is not None:
+            self.on_change()
 
     def _check(self) -> None:
         fit = self.fitter.poll()
@@ -264,6 +297,14 @@ class FitPanel:
         self._shown = summary_text(fit, peaks, period, perr, source, self.unit, drop)
         self.results.set_text(self._shown)
         self.figure.canvas.draw_idle()
+
+
+def drop_low(t, y):
+    """(size, time of the low, time of the high) of the initial drop of y(t) (first high to first
+    low), or None. A copied fit range is kept from this drop (agent/tools.py,
+    MainWindow._apply_plot_settings)."""
+    d = fitting.initial_drop(np.asarray(t, dtype=float), np.asarray(y, dtype=float))
+    return (abs(float(d.drop)), float(d.t_low), float(d.t_high)) if d.ok else None
 
 
 def attach_fit(figure, ax, t, y, unit: str):

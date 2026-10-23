@@ -599,10 +599,15 @@ def initial_drop(t, y) -> InitialDrop:
     The initial drop of a motion: from where the movement starts (the highest point before the
     first low) to the first low (the first turnaround of the period).
 
-    The first low is the first trough that stands out by a fifth of the signal's range (as for
-    peak_periods). The start is the highest point before it, so an object resting at the top
-    before it is let go is measured from its resting place (find_peaks would miss that high: it
-    never counts the first sample, and a rest has no clear peak).
+    The first low is the first trough that a fall of a fifth of the signal's range leads to. A
+    trough only has to stand out by a twentieth of the range to count: in a heavily damped motion
+    (a ball in a tube over water) the swing back after the drop is less than a fifth of the drop
+    (water 270, trial 1: a 51 cm drop, a 10 cm swing back), and a fifth, as for peak_periods,
+    found no low at all. Small dips on the way down (tracking jitter, the hand moving the ball
+    before it is let go) have no such fall before them, so they are passed over. The start is the
+    highest point before the low, so an object resting at the top before it is let go is measured
+    from its resting place (find_peaks would miss that high: it never counts the first sample,
+    and a rest has no clear peak).
     """
     t = np.asarray(t, dtype=float)
     y = np.asarray(y, dtype=float)
@@ -612,16 +617,17 @@ def initial_drop(t, y) -> InitialDrop:
     t, y = t[order], y[order]
     if len(t) < 3 or np.ptp(y) <= 0:
         return InitialDrop(ok=False, message="Select a range with a clear movement")
-    prominence = 0.2 * float(np.ptp(y))
-    minima, _ = find_peaks(-y, prominence=prominence)
+    span = float(np.ptp(y))
+    minima, _ = find_peaks(-y, prominence=0.05 * span)
     if minima.size == 0:
         return InitialDrop(ok=False, message="No clear low in the range")
-    low = int(minima[0])
-    start = int(np.argmax(y[:low + 1]))
-    if y[start] - y[low] < prominence:
-        return InitialDrop(ok=False, message="No starting high before the first low")
-    return InitialDrop(ok=True, t_high=float(t[start]), y_high=float(y[start]),
-                       t_low=float(t[low]), y_low=float(y[low]))
+    for low in minima:
+        low = int(low)
+        start = int(np.argmax(y[:low + 1]))
+        if y[start] - y[low] >= 0.2 * span:
+            return InitialDrop(ok=True, t_high=float(t[start]), y_high=float(y[start]),
+                               t_low=float(t[low]), y_low=float(y[low]))
+    return InitialDrop(ok=False, message="No starting high before the first low")
 
 
 def best_period(fit: FitResult, peaks: PeakPeriods):

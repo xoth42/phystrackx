@@ -134,6 +134,11 @@ class ModelTable(QWidget):
         if row != self.table.currentRow():
             self.table.selectRow(row)
 
+    def select(self, key: str) -> None:
+        """Picks the model `key`, as a click on its row does (from code: a tool, a revert)."""
+        if key in self.keys:
+            self.table.selectRow(self.keys.index(key))
+
     def _row_changed(self, row: int, *_) -> None:
         if 0 <= row < len(self.keys):
             self.chosen.emit(self.keys[row])

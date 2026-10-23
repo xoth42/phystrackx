@@ -107,6 +107,7 @@ class TrackedObject:
         self.boxes: dict[int, tuple | None] = {}  # Frame -> tracked box, or None where lost
         self.changed = True       # New, moved or resized since it was last tracked (Track runs it again)
         self.tracked_with = None  # (method, settings, start, end) of its last run
+        self.restart_frame = None  # Where the user corrected its tracked box (tracking goes on from there)
 
         self.selected = False  # Chosen in the object list: drawn thicker, and it can be dragged
         self.on_move = None  # Called as on_move(obj, box) when the user drags the box
@@ -212,6 +213,15 @@ class TrackedObject:
         self._points = []
         self.trail.setPath(QPainterPath())
         self.trail_edge.setPath(QPainterPath())
+        self.travelled.setPath(QPainterPath())
+        self.marker.hide()
+
+    def keep_before(self, frame: int, first: int = 0) -> None:
+        """Tracking again from `frame`: the track from there on goes, what came before stays (a
+        correction part-way, then Track, must not lose the good start of the track), from `first`
+        on (the trim's start: a track from before a later trim is not kept)."""
+        self.boxes = {f: b for f, b in self.boxes.items() if first <= f < frame}
+        self.draw_trail()
         self.travelled.setPath(QPainterPath())
         self.marker.hide()
 

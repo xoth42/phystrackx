@@ -371,6 +371,23 @@ def test_initial_drop_from_a_rest():
     h.check("it ends at the first low", abs(drop.t_low - (0.5 + 2.15)) < 0.2, f"t {drop.t_low:.2f}")
 
 
+def test_initial_drop_heavily_damped():
+    """A heavily damped motion, as water 270 trial 1: the swing back after the drop (10 cm) is less
+    than a fifth of the drop (51 cm). The low must still be found (it was not: a low had to stand
+    out by a fifth of the range); a dip on the way down must not be taken for it."""
+    from core.fit import initial_drop
+    t = np.arange(3.3, 5.6, 1 / 120)
+    s = t - 3.3
+    y = 25 + 46 * np.exp(-1.0 * s) * np.cos(5.45 * s)   # 71 at the start, first low near 4.0 s
+    y[(s > 0.2) & (s < 0.23)] += 0.3                      # Tracking jitter on the way down
+    drop = initial_drop(t, y)
+    h.check("the drop of a heavily damped motion is found", drop.ok, drop.message)
+    low = 3.3 + math.pi / 5.45 + math.atan(-1.0 / 5.45) / 5.45   # Where d/dt of the curve is 0 (its first low)
+    h.check("it ends at the first low, not at a dip on the way", abs(drop.t_low - low) < 0.03,
+            f"t {drop.t_low:.3f}, expected {low:.3f}")
+    h.check("it starts at the top", abs(drop.y_high - 71) < 0.5, f"y {drop.y_high:.2f}")
+
+
 def test_plot_shows_drop_markers_and_a_legend():
     import matplotlib.pyplot as plt
     from gui.components.plot.plot import Plot
@@ -459,6 +476,6 @@ if __name__ == "__main__":
                  test_drag_fit_on_damped_data_is_quick_and_stoppable,
                  test_plot_offers_the_drag_models, test_new_models_recover_their_parameters,
                  test_param_lines_cover_every_model, test_initial_drop_is_high_to_first_low,
-                 test_initial_drop_from_a_rest,
+                 test_initial_drop_from_a_rest, test_initial_drop_heavily_damped,
                  test_plot_shows_drop_markers_and_a_legend,
                  test_save_plot_starts_in_the_project_folder])

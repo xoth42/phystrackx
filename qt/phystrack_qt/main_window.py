@@ -7,8 +7,13 @@ the end of the trim (or of the video). The view follows the tracker live; scrubb
 Measuring: Place Ruler (its real length and unit give the scale) and Place Axis (the origin and
 direction) turn the tracked positions into physical values; Plots shows them, and Export Data
 writes them to CSV. Projects save the whole setup next to the video (see project_file.py).
+
+History and agents (docs/AGENT_PLAN.md): every change is an event in the History dock (click one
+to go back to it); there can be any number of windows, one trial each (windows.py); the agent tools
+(agent/tools.py) drive these same methods, and Space stops an agent that is working.
 """
 
+import copy
 import os
 import time
 
@@ -22,8 +27,9 @@ from PySide6.QtWidgets import (QDialog, QDockWidget, QFileDialog, QFrame, QHBoxL
 from core.autoruler import snap_ruler
 from core.units import parse_length
 
-from . import plot_warmup, project_file, recent
+from . import plot_warmup, project_file, recent, windows
 from .axes_item import AxesItem
+from .history import History, HistoryPanel
 from .measure import export_csv, physical, track_series
 from .ruler_item import RulerItem
 from .tracked_object import OutlineItem, TrackedObject
@@ -59,6 +65,10 @@ def _run_from_json(data):
 class MainWindow(QMainWindow):
     def __init__(self, cache_dir: str) -> None:
         super().__init__()
+        self.cache_dir = cache_dir
+        self.wid = windows.add(self)          # "w1", "w2"...: how agents and the user name this window
+        self.plots: dict = {}                 # Plot settings: {"kinds": [...], "fits": {kind: {"model", "range"}}}
+        self.history = History(self._snapshot, lambda: self.statusBar().currentMessage())
         self.source = VideoSource(cache_dir)
         self.source.progress.connect(self._on_progress)
         self.source.proxy_ready.connect(self._on_proxy_ready)
@@ -71,6 +81,9 @@ class MainWindow(QMainWindow):
         self.job: TrackJob | None = None
         self.track_method = DEFAULT_METHOD     # The method Track last ran with (offered first next time)
         self.track_options: dict = {}          # Method -> its options as last chosen
+        self.track_method_used = DEFAULT_METHOD  # The method of the run under way (or the last one)
+        self.last_track: dict | None = None    # How the last run went (for the agent tools)
+        self.agent_track = False               # The run under way was started by an agent (Space stops it)
         self._move_from = None                  # The selected box when a Move drag began
         self._job_objects: list = []           # The objects the running job tracks (in its order)
         self.ask_track_method = True           # Track first asks for the method (tests turn it off)
@@ -94,6 +107,7 @@ class MainWindow(QMainWindow):
 
         # Menu: projects and export, as in the Tk app
         file_menu = self.menuBar().addMenu("File")
+        self._action(file_menu, "New Window", lambda: windows.new_window(), "Ctrl+N")
         self._action(file_menu, "Open Video…", self.choose_video, "Ctrl+Shift+O")
         self._action(file_menu, "Open Project…", self.open_project, "Ctrl+O")
         self._action(file_menu, "Save Project", self.save_project, "Ctrl+S")
@@ -128,7 +142,7 @@ class MainWindow(QMainWindow):
                                (self.circle_btn, self.start_circle),
                                (self.find_btn, self.start_auto),
                                (self.track_btn, self.toggle_track),
-                               (self.plots_btn, self.show_plots),
+                               (self.plots_btn, lambda: self.show_plots()),   # Not clicked's bool as kinds
                                (self.export_btn, self.export_data),
                                (self.start_btn, self.go_start),
                                (self.end_btn, self.go_end),
@@ -259,16 +273,22 @@ class MainWindow(QMainWindow):
         self.progress.hide()
         self.zoom_label = QLabel()
         self.draw_label = QLabel()
-        for w in (self.progress, self.zoom_label, self.draw_label):
+        self.agent_label = QLabel()   # Shown while an agent works: Space stops it
+        self.agent_label.setStyleSheet("QLabel { color: white; background: #3a7bd5; padding: 1px 6px; }")
+        self.agent_label.hide()
+        for w in (self.agent_label, self.progress, self.zoom_label, self.draw_label):
             self.statusBar().addPermanentWidget(w)
         self.statusBar().showMessage("Import a video to start")
         self._build_object_dock()
+        self._build_history_dock()
+        self._build_assistant_dock()
+        windows.AGENT.changed.connect(self._show_agent)
 
         # One frame at a time with the arrows; Escape ends a tool; zoom from the keyboard
         QShortcut(QKeySequence(Qt.Key.Key_Left), self, lambda: self._step(-1))
         QShortcut(QKeySequence(Qt.Key.Key_Right), self, lambda: self._step(1))
         QShortcut(QKeySequence(Qt.Key.Key_Escape), self, self._cancel_tool)
-        QShortcut(QKeySequence(Qt.Key.Key_Space), self, self.toggle_play)
+        QShortcut(QKeySequence(Qt.Key.Key_Space), self, self._space)   # Plays, or stops a working agent
         # Letters act as pressing the button labelled with them (a disabled button does nothing)
         for key, button in ((Qt.Key.Key_I, self.import_btn), (Qt.Key.Key_Y, self.trim_btn),
                             (Qt.Key.Key_F, self.ruler_btn), (Qt.Key.Key_G, self.axis_btn),
@@ -336,6 +356,8 @@ class MainWindow(QMainWindow):
         self._dirty = False
         self._title()
         name = os.path.basename(path)
+        self.history.reset()   # A new video is a new history, starting from it
+        self.history.log("open", f"Opened {name}", {"video": name})
         took = (time.perf_counter() - t0) * 1000
         if self.source.has_proxy:
             self.statusBar().showMessage(f"{name}: {self.source.fcount} frames, "
@@ -364,20 +386,10 @@ class MainWindow(QMainWindow):
         self._pause()
         if self.job is not None:
             self.job.stop()
-        self._drop_candidate()
-        for obj in self.objects:  # Objects belong to the old video
-            obj.remove()
-        self.objects.clear()
-        self._refresh_objects()
-        self.trim = None
-        self.trim_row.hide()
-        if self.axes is not None:  # Axes and ruler belong to the old video
-            self.view.scene().removeItem(self.axes)
-            self.axes = None
-        if self.ruler is not None:
-            self.view.scene().removeItem(self.ruler)
-            self.ruler = None
-        self.ruler_panel.hide()
+        self._clear_setup()       # The setup belongs to the old video
+        self.plots = {}
+        for window in self.plot_windows():   # And so do its plots
+            window.close()
         self.seek.blockSignals(True)
         self.seek.setRange(0, max(0, self.source.fcount - 1))
         self.seek.setValue(0)
@@ -387,17 +399,38 @@ class MainWindow(QMainWindow):
             button.setEnabled(True)
         self._show(0)
 
+    def _clear_setup(self) -> None:
+        """Removes the objects, axes, ruler and trim (a new video, or a revert that puts others back)."""
+        self._end_tools()
+        self._drop_candidate()
+        for obj in self.objects:
+            obj.remove()
+        self.objects.clear()
+        self._refresh_objects()
+        self.trim = None
+        self.trim_row.hide()
+        if self.axes is not None:
+            self.view.scene().removeItem(self.axes)
+            self.axes = None
+        if self.ruler is not None:
+            self.view.scene().removeItem(self.ruler)
+            self.ruler = None
+        self.ruler_panel.hide()
+        self.undo_btn.setEnabled(False)
+
     def _on_failed(self, message: str) -> None:
         self.progress.hide()
         self.statusBar().clearMessage()
         QMessageBox.warning(self, "Import Video", message)
 
     # --- Projects --------------------------------------------------------------------------------
-    def _touch(self) -> None:
-        """Something changed: the project now needs saving."""
+    def _touch(self, op: str = "edit", params: dict | None = None) -> None:
+        """Something changed: the project now needs saving, and the history gets an event `op`
+        (committed after a short pause, so a drag is one event)."""
         if not self._dirty:
             self._dirty = True
             self._title()
+        self.history.note(op, params)
 
     def _title(self) -> None:
         name = None
@@ -406,7 +439,7 @@ class MainWindow(QMainWindow):
         elif self.source.path:
             name = os.path.basename(self.source.path)
         star = " *" if self._dirty else ""
-        self.setWindowTitle("PhysTrackX (Qt spike)" + (f" – {name}{star}" if name else ""))
+        self.setWindowTitle(f"PhysTrackX (Qt spike) [{self.wid}]" + (f" – {name}{star}" if name else ""))
 
     def _confirm_discard(self) -> bool:
         """True if the current project may be replaced or closed: unchanged, or the user chose to
@@ -445,12 +478,19 @@ class MainWindow(QMainWindow):
             return False
         if not self.load_video(state["video"]):
             return False
-        self._apply_state(state)
+        self.history.paused = True   # Opening is one event, not one per thing put back
+        try:
+            self._apply_state(state)
+        finally:
+            self.history.paused = False
         self.project_path = path
         self._dirty = False
         recent.remember(path)
         self._title()
         self.statusBar().showMessage(f"Opened {os.path.basename(path)}")
+        self.history.reset()
+        self.history.log("open", f"Opened project {os.path.basename(path)}",
+                         {"project": os.path.basename(path)})
         return True
 
     def _fill_recent_menu(self) -> None:
@@ -500,10 +540,12 @@ class MainWindow(QMainWindow):
         recent.remember(path)
         self._title()
         self.statusBar().showMessage(f"Saved the project to {os.path.abspath(path)}")
+        self.history.log("save_project", f"Saved {os.path.basename(path)}", {"file": os.path.basename(path)})
         return True
 
-    def _project_state(self) -> dict:
-        """Everything the project keeps: all in picture pixels, so it reopens at any window size."""
+    def _project_state(self, boxes: bool = True) -> dict:
+        """Everything the project keeps: all in picture pixels, so it reopens at any window size.
+        `boxes`: with each object's track (as JSON wants it: frame numbers as text)."""
         axes = None
         if self.axes is not None:
             p = self.axes.pos()
@@ -518,16 +560,67 @@ class MainWindow(QMainWindow):
                     "marked_frame": o.marked_frame, "changed": o.changed,
                     "tracked_with": _run_to_json(o.tracked_with),
                     "boxes": {str(f): (list(b) if b is not None else None)
-                              for f, b in o.boxes.items()}}
+                              for f, b in o.boxes.items()} if boxes else None}
                    for o in self.objects]
         return {"video": os.path.abspath(self.source.path),
                 "picture": list(self.view.picture.pixmap().size().toTuple()),
                 "frame": self.seek.value(),
                 "trim": list(self.trim) if self.trim else None,
-                "axes": axes, "ruler": ruler, "objects": objects}
+                "axes": axes, "ruler": ruler, "objects": objects,
+                "plots": copy.deepcopy(self.plots)}
+
+    def _snapshot(self) -> dict | None:
+        """The history's snapshot, once a video is open: the project state, but cheap, as it is
+        taken on every change (each move of a drag). Tracks are shallow copies (frame -> box
+        tuple); _apply_state reads these as it reads a project file's."""
+        if not self.source.path:
+            return None
+        state = self._project_state(boxes=False)
+        for entry, obj in zip(state["objects"], self.objects):
+            entry["boxes"] = dict(obj.boxes)
+        return state
+
+    def revert_to(self, n: int) -> bool:
+        """Goes back to the history's event n (logged as an event, so it can be undone too)."""
+        if self.job is not None:
+            self.statusBar().showMessage("Stop tracking before going back in the history")
+            return False
+        snap = self.history.revert_target(n)
+        if snap is None:
+            return False
+        self.history.paused = True   # Putting the snapshot back is the revert event, not more events
+        try:
+            self._pause()
+            self._clear_setup()
+            self.seek.setRange(0, max(0, self.source.fcount - 1))
+            self._apply_state(snap)
+        finally:
+            self.history.paused = False
+        self._dirty = True
+        self._title()
+        closed = " Plots whose data changed were closed (Plots opens them again)." \
+            if self._close_stale_plots() else ""
+        self.statusBar().showMessage(f"Back to #{n}. Click a later event to go forward again.{closed}")
+        return True
+
+    def _data_keys(self) -> dict:
+        """Each object's measured track as a key (object number -> key): a plot drawn from other
+        data (an older track, other axes or scale) is stale."""
+        return {number: (len(t), round(float(xy.sum()), 6)) for number, _, t, xy in self._measured()}
+
+    def _close_stale_plots(self) -> int:
+        """Closes the plots that no longer show their object's data. Returns how many."""
+        keys = self._data_keys()
+        stale = [w for w in self.plot_windows() if keys.get(w.number) != getattr(w, "data_key", None)]
+        for window in stale:
+            window.close()
+        return len(stale)
 
     def _apply_state(self, state: dict) -> None:
-        """Puts a project's setup back on the video that was just loaded."""
+        """Puts a project's setup back on the video that was just loaded (or, for a revert, on the
+        video cleared of its setup)."""
+        self.plots = copy.deepcopy(state.get("plots") or {})
+        self._apply_plot_settings()
         if list(state.get("picture", [])) != list(self.view.picture.pixmap().size().toTuple()):
             self.statusBar().showMessage("The video's size has changed since the project was saved; "
                                          "positions may be off", 10000)
@@ -691,14 +784,14 @@ class MainWindow(QMainWindow):
         self.trim = (start, end)
         self.seek.setRange(start, end)
         self.trim_row.hide()
-        self._touch()
+        self._touch("trim", {"start": start, "end": end})
         self.statusBar().showMessage(f"Trimmed to frames {start} to {end} ({end - start + 1} frames)")
 
     def _clear_trim(self) -> None:
         self.trim = None
         self.seek.setRange(0, self.source.fcount - 1)
         self.trim_row.hide()
-        self._touch()
+        self._touch("trim")
         self.statusBar().showMessage("Whole video")
 
     # --- Ruler -----------------------------------------------------------------------------------
@@ -722,7 +815,7 @@ class MainWindow(QMainWindow):
         self.ruler.length_requested.connect(self.set_ruler_length)
 
     def _on_ruler_changed(self) -> None:
-        self._touch()
+        self._touch("ruler")
         self.undo_btn.setEnabled(self.ruler.can_undo())
         self._report_ruler()
 
@@ -788,14 +881,14 @@ class MainWindow(QMainWindow):
         self.ruler = None
         self.ruler_panel.hide()
         self.undo_btn.setEnabled(False)
-        self._touch()
+        self._touch("ruler")
         self.statusBar().showMessage("Ruler removed")
 
     # --- Axes ------------------------------------------------------------------------------------
     def _make_axes(self, length: float) -> AxesItem:
         axes = AxesItem(length, self.view.picture)
         axes.changed.connect(self._report_axes)
-        axes.changed.connect(self._touch)
+        axes.changed.connect(lambda: self._touch("axes"))
         return axes
 
     def start_axis(self) -> None:
@@ -810,7 +903,7 @@ class MainWindow(QMainWindow):
             size = self.view.picture.boundingRect()
             self.axes = self._make_axes(0.3 * min(size.width(), size.height()))
         self.axes.setPos(point)
-        self._touch()
+        self._touch("axes")
         self._report_axes()
 
     def _report_axes(self) -> None:
@@ -864,7 +957,7 @@ class MainWindow(QMainWindow):
         obj.on_move = self._object_dragged
         self.objects.append(obj)
         self._refresh_objects(select=obj)   # So D removes it at once, and it can be moved or sized
-        self._touch()
+        self._touch("mark", {"n": obj.number})
         shape = "circle" if circle else "object"
         self.statusBar().showMessage(f"{shape.capitalize()} {obj.number} marked on frame {frame}. "
                                      "Mark another, or Escape when done, then Track (D removes it)")
@@ -916,13 +1009,15 @@ class MainWindow(QMainWindow):
                 f"{BY_KEY[method].title}. Move or resize an object, or pick another method, to track again")
             return
         # Each object starts from its box as shown on this frame (the marked box, or where the last
-        # run had it here), so tracking can be restarted from any frame
+        # run had it here, or where the user moved it), so tracking can be restarted from any
+        # frame. Its track before this frame is kept: only the part from here on is tracked again
         boxes, outlines = [], []
         for obj in todo:
             r = obj.rect.rect()
             boxes.append((r.x(), r.y(), r.width(), r.height()))
             outlines.append(obj.outline)
-            obj.clear_track()
+            obj.keep_before(start, first=self.trim[0] if self.trim else 0)
+            obj.restart_frame = None
             obj.tracked_with = run
         self._job_objects = todo
         self.job = TrackJob(self.source.proxy_path, boxes, start, end, method, options, outlines)
@@ -933,6 +1028,7 @@ class MainWindow(QMainWindow):
         self.job.finished.connect(self._on_track_done)
         self.job.failed.connect(self._on_track_failed)
         self._track_method_title = BY_KEY[method].title
+        self.track_method_used = method
         self._track_t0, self._track_range = time.perf_counter(), (start, end)
         self.progress.setRange(0, 1000)   # The whole run: every object and pass, once
         self.progress.setFormat(self.frame_text(start))
@@ -997,7 +1093,7 @@ class MainWindow(QMainWindow):
         self._drop_candidate()
         self.objects.append(obj)
         self._refresh_objects(select=obj)
-        self._touch()
+        self._touch("mark", {"n": obj.number, "auto": True})
         self._show(frame)
         self.statusBar().showMessage(f"Object {obj.number} accepted on frame {frame}. Mark another, "
                                      "or Escape when done, then Track")
@@ -1045,7 +1141,9 @@ class MainWindow(QMainWindow):
             return
         obj = self._job_objects[k]
         start = self._track_range[0]
-        obj.boxes = {start + i: box for i, box in enumerate(boxes)}
+        # The path replaces the track from the run's start on; the frames before it are kept
+        kept = {f: b for f, b in obj.boxes.items() if f < start}
+        obj.boxes = {**kept, **{start + i: box for i, box in enumerate(boxes)}}
         obj.draw_trail()
         obj.show_frame(self.seek.value())
 
@@ -1065,16 +1163,19 @@ class MainWindow(QMainWindow):
         ran = self._job_objects
         done = max((max(o.boxes) for o in ran if o.boxes), default=start) - start
         took = time.perf_counter() - self._track_t0
-        lost = sum(1 for o in ran for b in o.boxes.values() if b is None)
+        lost = sum(1 for o in ran for f, b in o.boxes.items() if f >= start and b is None)   # This run's
         for obj in ran:
             obj.changed = not completed   # A stopped run's objects are tracked again next time
         kept = len(self.objects) - len(ran)
-        self._touch()
+        self.last_track = {"frames": done, "lost": lost, "s": round(took, 1), "completed": completed}
+        self._touch("track", {"method": self.track_method_used, "completed": completed})
+        closed = self._close_stale_plots()   # Plots of the old track
         self.statusBar().showMessage(
             f"{'Tracked' if completed else 'Stopped after'} {done} frames in {took:.1f} s "
             f"({done / max(took, 1e-6):.0f} frames/s) with {self._track_method_title}, "
             f"{len(ran)} object(s), {lost} lost frame(s)"
-            + (f"; {kept} unchanged object(s) kept their tracks" if kept else ""))
+            + (f"; {kept} unchanged object(s) kept their tracks" if kept else "")
+            + ("; plots of the old track were closed (Plots opens them again)" if closed else ""))
 
     def _on_track_failed(self, message: str) -> None:
         for obj in self._job_objects:
@@ -1097,6 +1198,7 @@ class MainWindow(QMainWindow):
         self.progress.hide()
         self._follow_tracker()  # The whole trail
         self.job = None
+        self.agent_track = False
         self.track_btn.setText("Track")
         self.track_btn.setEnabled(True)
         self.mark_btn.setEnabled(True)
@@ -1128,38 +1230,138 @@ class MainWindow(QMainWindow):
             rows.append((obj.number, frames, frames / self.source.measure_fps, xy))
         return rows
 
-    def show_plots(self) -> None:
-        from .plot_window import choose_plots, open_plots  # matplotlib and scipy: loaded on first use (startup)
+    def show_plots(self, kinds: list | None = None) -> list:
+        """Opens the plots `kinds` for every tracked object (asks which when not given). A plot that
+        is open already is kept (and brought up), not opened twice. Returns the plot windows."""
+        from .plot_window import DEFAULT_KINDS, choose_plots, open_plots  # matplotlib and scipy: loaded on first use (startup)
         self._end_tools()
+        if not isinstance(kinds, (list, tuple)):   # A signal's argument (clicked passes a bool): ask
+            kinds = None
+        asked = kinds is None
         if self.axes is None:
-            QMessageBox.information(self, "Plots", "Place the axes first: the plots are measured "
-                                    "from their origin.")
-            return
+            if asked:
+                QMessageBox.information(self, "Plots", "Place the axes first: the plots are measured "
+                                        "from their origin.")
+            return []
         series = self._measured()
         if not series:
-            QMessageBox.information(self, "Plots", "Track an object first.")
-            return
-        kinds = choose_plots(self)
-        if not kinds:
-            return
-        self._plot_windows = [w for w in self._plot_windows if w.isVisible()]   # Closed ones go
+            if asked:
+                QMessageBox.information(self, "Plots", "Track an object first.")
+            return []
+        if asked:
+            kinds = choose_plots(self, self.plots.get("kinds") or DEFAULT_KINDS)
+            if not kinds:
+                return []
+        self._close_stale_plots()   # An open plot of older data is replaced, not brought up
+        open_now = {(w.number, w.kind): w for w in self.plot_windows()}
+        shown = []
         for number, _, t, xy in series:
-            self._plot_windows += open_plots(number, t, xy, self._unit(), kinds, self.source.path,
-                                             on_saved=self.statusBar().showMessage)
+            todo = [k for k in kinds if (number, k) not in open_now]
+            for window in open_plots(number, t, xy, self._unit(), todo, self.source.path):
+                window.data_key = (len(t), round(float(xy.sum()), 6))   # As _data_keys
+                self._plot_windows.append(window)
+                window.on_saved = lambda message, w=window: self._plot_saved(w, message)
+                if window.fit_panel is not None:
+                    window.fit_panel.on_change = lambda w=window: self._fit_changed(w)
+                shown.append(window)
+            for k in kinds:
+                if (number, k) in open_now:
+                    open_now[(number, k)].raise_()
+                    shown.append(open_now[(number, k)])
+        self.plots["kinds"] = list(dict.fromkeys(list(self.plots.get("kinds", [])) + list(kinds)))
+        self._apply_plot_settings()
+        fits = self.plots.setdefault("fits", {})
+        for window in shown:   # A kind's first plot: its default model and range are the settings
+            if window.fit_panel is not None:
+                fit = fits.setdefault(window.kind, {})
+                fit.setdefault("model", window.fit_panel.model)
+                fit.setdefault("range", [float(v) for v in window.fit_panel.range])
+        params = {"kinds": list(kinds)}
+        first = next((fits[k] for k in kinds if k in fits), None)
+        if first:   # The fit is in the event, so the agent (and the user) can tell refits apart
+            params["model"] = first.get("model")
+            if first.get("range"):
+                params["range"] = [round(v, 3) for v in first["range"]]
+        self.history.log("plots", f"Plots {', '.join(kinds)}", params)
+        return shown
 
-    def export_data(self) -> None:
+    def plot_windows(self) -> list:
+        """The open plot windows of this window's video."""
+        self._plot_windows = [w for w in self._plot_windows if w.isVisible()]   # Closed ones go
+        return list(self._plot_windows)
+
+    def _apply_plot_settings(self) -> None:
+        """The fit model and range of each kind, as the settings say, on the open plots.
+        QUICK-AND-DIRTY: settings are per kind (every object's r plot shares one), and a revert
+        sets the model and range of open plots but does not redraw their data."""
+        self._applying_plots = True
+        try:
+            from .analysis import drop_low
+            fits = self.plots.get("fits") or {}
+            # A fit range copied from another trial counts from the end of the initial drop: put
+            # it on this trial's drop, found on the object of that kind that drops most
+            for kind, fit in fits.items():
+                if fit.get("from_low"):
+                    lows = [drop_low(w.fit_panel.t, w.fit_panel.y) for w in self.plot_windows()
+                            if w.kind == kind and w.fit_panel is not None]
+                    lows = [low for low in lows if low is not None]
+                    if lows:
+                        _, t_low, t_high = max(lows)
+                        rel = fit.pop("from_low")
+                        # A range that started at the source's release starts at this one's
+                        start = t_high if fit.pop("from_high", False) else t_low + rel[0]
+                        fit["range"] = [start, t_low + rel[1]]
+            for window in self.plot_windows():
+                fit = fits.get(window.kind)
+                panel = window.fit_panel
+                if fit is None or panel is None:
+                    continue
+                if fit["model"] != panel.model and fit["model"] in panel.keys:
+                    if window.model_table is not None:
+                        window.model_table.select(fit["model"])   # Its row; that chooses the model
+                    panel.choose(fit["model"])
+                if fit.get("range"):
+                    lo, hi = fit["range"]
+                    if abs(lo - panel.range[0]) > 1e-6 or abs(hi - panel.range[1]) > 1e-6:
+                        panel.set_range(lo, hi)
+        finally:
+            self._applying_plots = False
+
+    def _fit_changed(self, window) -> None:
+        """A plot's model or range changed: kept in the settings (and so in the history)."""
+        if getattr(self, "_applying_plots", False):
+            return
+        panel = window.fit_panel
+        fits = self.plots.setdefault("fits", {})
+        fit = {"model": panel.model, "range": [float(panel.range[0]), float(panel.range[1])]}
+        if fits.get(window.kind) != fit:
+            fits[window.kind] = fit
+            self._touch("fit", {"kind": window.kind, "model": panel.model,
+                                "range": [round(v, 3) for v in fit["range"]]})
+
+    def _plot_saved(self, window, message: str) -> None:
+        self.statusBar().showMessage(message)
+        params = {"kind": window.kind, "n": window.number}
+        if window.fit_panel is not None:
+            params.update(window.fit_panel.summary())
+        self.history.log("save_plots", f"Saved plot {window.kind} of object {window.number}", params)
+
+    def export_data(self) -> str | None:
+        """Writes every object's positions to CSV next to the video. Returns the path."""
         series = self._measured()
         if not series:
             QMessageBox.information(self, "Export Data", "Place the axes and track an object first.")
-            return
+            return None
         # No questions: every object, next to the video, named after it
         path = project_file.output_path(self.source.path, "_data", ".csv")
         try:
             export_csv(path, series, self._unit())
         except OSError as e:
             QMessageBox.warning(self, "Export Data", f"The data could not be saved:\n{e}")
-            return
+            return None
         self.statusBar().showMessage(f"Exported {len(series)} object(s) to {path}")
+        self.history.log("export_csv", f"Exported {os.path.basename(path)}", {"file": os.path.basename(path)})
+        return path
 
     # --- Objects ---------------------------------------------------------------------------------
     def _build_object_dock(self) -> None:
@@ -1190,7 +1392,69 @@ class MainWindow(QMainWindow):
         dock.setFeatures(QDockWidget.DockWidgetFeature.DockWidgetMovable |
                          QDockWidget.DockWidgetFeature.DockWidgetFloatable)
         self.addDockWidget(Qt.DockWidgetArea.RightDockWidgetArea, dock)
+        self.object_dock = dock
         self._update_object_buttons()
+
+    def _build_assistant_dock(self) -> None:
+        """The assistant, under the history: the app's one conversation with the local model
+        (agent/session.py); every window shows it."""
+        from .agent.chat_panel import ChatPanel
+        from .agent.session import shared
+        self.assistant_panel = ChatPanel(shared(), focus_after_send=self.view)
+        dock = QDockWidget("Assistant", self)
+        dock.setWidget(self.assistant_panel)
+        dock.setFeatures(QDockWidget.DockWidgetFeature.DockWidgetMovable |
+                         QDockWidget.DockWidgetFeature.DockWidgetFloatable)
+        self.addDockWidget(Qt.DockWidgetArea.RightDockWidgetArea, dock)
+        self.splitDockWidget(self.history_dock, dock, Qt.Orientation.Vertical)
+        self.resizeDocks([self.object_dock, self.history_dock, dock], [2, 3, 4], Qt.Orientation.Vertical)
+        self.assistant_dock = dock
+
+    def _build_history_dock(self) -> None:
+        """The history, under the objects: every change, newest last; a click goes back to one.
+        The assistant's dock goes under it (_build_assistant_dock)."""
+        self.history_panel = HistoryPanel(self.history, self.revert_to)
+        dock = QDockWidget("History", self)
+        dock.setWidget(self.history_panel)
+        dock.setFeatures(QDockWidget.DockWidgetFeature.DockWidgetMovable |
+                         QDockWidget.DockWidgetFeature.DockWidgetFloatable)
+        self.addDockWidget(Qt.DockWidgetArea.RightDockWidgetArea, dock)
+        self.splitDockWidget(self.object_dock, dock, Qt.Orientation.Vertical)
+        self.resizeDocks([self.object_dock, dock], [1, 1], Qt.Orientation.Vertical)
+        self.history_dock = dock
+
+    # --- Agent -----------------------------------------------------------------------------------
+    def _space(self) -> None:
+        """Space stops an agent that is working: while one of its calls runs, that is all it does.
+        Between its calls (an agent thinking, or done) it stops the agent and still plays and
+        pauses, so Space never stops playing the video for an agent that has finished."""
+        gate = windows.AGENT
+        if gate.busy():
+            gate.stop()
+            self.statusBar().showMessage("Agent stopped. Correct what you need (the history shows "
+                                         "it), then tell the agent to resume")
+            return
+        if gate.running():
+            gate.stop()
+        self.toggle_play()
+
+    def _show_agent(self) -> None:
+        gate = windows.AGENT
+        if gate.stopped:
+            self.agent_label.setText("🤖 Agent stopped: tell it to resume")
+            self.agent_label.show()
+        elif gate.running():
+            self.agent_label.setText("🤖 Agent working: Space stops it")
+            self.agent_label.show()
+            if gate.calls == 0:   # Idle: the label goes once it counts as not working any more
+                QTimer.singleShot(int(gate.ACTIVE_S * 1000) + 200, self._show_agent)
+        else:
+            self.agent_label.hide()
+
+    def changeEvent(self, event) -> None:
+        if event.type() == event.Type.ActivationChange and self.isActiveWindow():
+            windows.activated(self.wid)
+        super().changeEvent(event)
 
     def _next_number(self) -> int:
         return max((o.number for o in self.objects), default=0) + 1
@@ -1249,11 +1513,12 @@ class MainWindow(QMainWindow):
         obj.changed = True   # Tracked again on the next run
         if obj.boxes:
             obj.boxes[frame] = rect
+            obj.restart_frame = frame   # A correction part-way: tracking goes on from here
             obj.draw_trail()
         else:
             obj.marked = rect
         obj.show_frame(frame)
-        self._touch()
+        self._touch("move", {"n": obj.number})
         self.statusBar().showMessage(f"Moved or resized object {obj.number} on frame {frame}; Track will "
                                      "track it again", 5000)
 
@@ -1327,12 +1592,16 @@ class MainWindow(QMainWindow):
     def _after_objects_change(self, message: str) -> None:
         self._refresh_objects()
         self._show(self.seek.value())
-        self._touch()
+        self._touch("objects")
+        self._close_stale_plots()   # A removed object's plots, or a cleared track's
         self.statusBar().showMessage(message)
 
     # --- Window ----------------------------------------------------------------------------------
     def closeEvent(self, event) -> None:
         if self._confirm_discard():
             event.accept()
+            if self.job is not None:
+                self.job.stop()
+            windows.remove(self.wid)
         else:
             event.ignore()
