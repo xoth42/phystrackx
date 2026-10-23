@@ -189,8 +189,10 @@ class ChatPanel(QWidget):
             rows.append(f'<p style="margin: 2px 0;">{prefix}{body}</p>')
         if self._live:
             rows.append(f'<p style="margin: 2px 0;">{html.escape(self._live)}▍</p>')
-        elif self._waiting_for_text() and self._cursor_on:
-            rows.append('<p style="margin: 2px 0;">▍</p>')
+        elif self._waiting_for_text():
+            # Off, a space keeps the line, so the text does not move up and down each blink
+            cursor = "▍" if self._cursor_on else "&nbsp;"
+            rows.append(f'<p style="margin: 2px 0;">{cursor}</p>')
         self.view.setHtml("".join(rows))
         bar = self.view.verticalScrollBar()
         bar.setValue(bar.maximum())

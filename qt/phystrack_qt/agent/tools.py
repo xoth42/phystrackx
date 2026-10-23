@@ -27,6 +27,7 @@ from core.units import parse_length
 
 from .. import windows
 from ..autodetect import find_object, outline_relative
+from ..project_file import EXTENSION as PROJECT_TYPE
 from ..track_methods import BY_KEY
 from ..tracked_object import TrackedObject
 from . import relocate
@@ -175,6 +176,7 @@ def _name(path: str | None) -> str | None:
 @_tool("windows")
 def tool_windows():
     return [{"w": wid, "video": _name(w.source.path), "ev": w.history.last(),
+             **({"project": _name(w.project_path)} if w.project_path else {}),
              **({"cur": True} if wid == (target or windows.active) else {})}
             for wid, w in windows.all_windows().items()]
 
@@ -255,6 +257,8 @@ def tool_videos():
         if name.lower().endswith(VIDEO_TYPES) and not name.startswith("."):
             wid = open_in.get(os.path.join(folder, name))
             out.append(f"{name} ({wid})" if wid else name)
+        elif name.lower().endswith(PROJECT_TYPE) and not name.startswith("."):   # A trial's setup and saves
+            out.append(f"{name} (project)")
     return {"folder": os.path.basename(folder), "videos": out}
 
 
@@ -282,27 +286,18 @@ def recipe(S) -> dict:
     # The source's fits, per object and plot ("2r" = object 2's r plot). Trials of one experiment
     # should come out alike, so run_recipe checks the new fits against these
     source_fits = {}
-    for e in S.history.events:   # The saves and exports, in the order they were first done
-        if e.undone or e.op not in ("save_plots", "export_csv", "save_project"):
-            continue
-        if [e.op, {}] not in steps:
-            steps.append([e.op, {}])
-        if e.op == "save_plots" and "T" in e.params:
-            source_fits[f"{e.params['n']}{e.params['kind']}"] = {"T": e.params["T"], "r2": e.params.get("r2")}
+    for op, params in S.history.cookbook:   # The saves and exports, in the order they were first done
+        if [op, {}] not in steps:
+            steps.append([op, {}])
+        if op == "save_plots" and "T" in params:
+            source_fits[f"{params['n']}{params['kind']}"] = {"T": params["T"], "r2": params.get("r2")}
     for f in _fit_summaries(S):   # Plots open now say it best
         if "T" in f:
             source_fits[f"{f['n']}{f['kind']}"] = {"T": f["T"], "r2": f.get("r2")}
-    # Questions for the user before running it: what the source does not say
-    ask = []
-    if not any(name == "plots" for name, _ in steps):
-        ask.append("The source made no plots: which plots (kinds), and should they be saved?")
-    if not any(name in ("save_plots", "export_csv", "save_project") for name, _ in steps):
-        ask.append("The source saved nothing since it was opened: what should be saved?")
-    if len(S.objects) > 1:
-        ask.append(f"The source has objects {[o.number for o in S.objects]}: which should be copied "
-                   "and tracked? (run_recipe only=[...])")
+    # No questions here: the steps are the source's work as it was done (a source with no plots or
+    # saves has none to repeat), so the agent asks only about a choice the request leaves open
     return {"src": S.wid, "video": _name(S.source.path), "steps": steps,
-            **({"source_fits": source_fits} if source_fits else {}), **({"ask": ask} if ask else {})}
+            **({"source_fits": source_fits} if source_fits else {})}
 
 
 @_tool("data")
@@ -343,9 +338,12 @@ def _find_video(video: str) -> str:
         exact = os.path.join(folder, video)
         if os.path.isfile(exact):
             return exact
-        for name in os.listdir(folder):   # Case and extension forgiven: "air trial 2"
-            if os.path.splitext(name)[0].lower() == os.path.splitext(video)[0].lower() and \
-                    name.lower().endswith(VIDEO_TYPES + (".phystrack",)):
+        # Case forgiven: "air trial 2". Without an extension a video is preferred to its project
+        stem, ext = os.path.splitext(video)
+        for name in sorted(os.listdir(folder), key=lambda n: n.lower().endswith(PROJECT_TYPE)):
+            base, kind = os.path.splitext(name)
+            if base.lower() == stem.lower() and name.lower().endswith(VIDEO_TYPES + (PROJECT_TYPE,)) \
+                    and (not ext or kind.lower() == ext.lower()):
                 return os.path.join(folder, name)
     raise ToolError(f"no video {video!r}: call videos for the names")
 
@@ -354,8 +352,10 @@ def _find_video(video: str) -> str:
 def tool_open(video: str):
     global target
     path = _find_video(video)
-    for wid, w in windows.all_windows().items():   # Open already: that window
-        if w.source.path and os.path.abspath(w.source.path) == os.path.abspath(path):
+    project = path.endswith(PROJECT_TYPE)
+    for wid, w in windows.all_windows().items():   # Open already: that window (a project: its own project)
+        shown = w.project_path if project else w.source.path
+        if shown and os.path.abspath(shown) == os.path.abspath(path):
             target = wid
             windows.focus(w)
             return {"w": wid, "frames": w.source.fcount, "note": "already open"}

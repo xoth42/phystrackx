@@ -516,6 +516,7 @@ class MainWindow(QMainWindow):
         else:
             self.statusBar().showMessage(f"Opened {os.path.basename(path)}")
         self.history.reset()
+        self.history.cookbook = list(state.get("cookbook", []))   # The saves and exports of the trial that made it
         self.history.log("open", f"Opened project {os.path.basename(path)}",
                          {"project": os.path.basename(path)})
         session.update(self)
@@ -559,7 +560,7 @@ class MainWindow(QMainWindow):
 
     def save_project_file(self, path: str) -> bool:
         try:
-            project_file.save(path, self._project_state())
+            project_file.save(path, {**self._project_state(), "cookbook": self.history.cookbook})
         except OSError as e:
             QMessageBox.warning(self, "Save Project", f"The project could not be saved:\n{e}")
             return False
@@ -1699,12 +1700,13 @@ class MainWindow(QMainWindow):
         """What reopening a closed trial needs: its video, its project file if it has one, its setup as it was
         (saved or not), and whether it had changes."""
         return {"video": os.path.abspath(self.source.path), "project": self.project_path,
-                "state": self._project_state(), "dirty": self._dirty}
+                "state": self._project_state(), "dirty": self._dirty, "cookbook": list(self.history.cookbook)}
 
     def restore_closed(self, entry: dict) -> bool:
         """Puts a closed trial back on this window (see _closed_entry). False if its video cannot be opened."""
         if not self.load_video(entry["video"]):
             return False
+        self.history.cookbook = list(entry.get("cookbook", []))
         self.history.paused = True   # Putting the setup back is one event, as opening a project is
         try:
             self._apply_state(entry["state"])

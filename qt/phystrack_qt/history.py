@@ -22,6 +22,7 @@ from PySide6.QtWidgets import QListWidget, QListWidgetItem
 
 COMMIT_MS = 300  # A change is committed once no other came for this long (drags make one event)
 ACTIONS = ("open", "export_csv", "save_plots", "save_project", "plots", "revert", "copy_setup", "note")
+COOKBOOK_OPS = ("save_plots", "export_csv", "save_project")   # The saves and exports: kept with the project, for recipes
 
 
 @dataclass
@@ -69,6 +70,7 @@ class History(QObject):
         super().__init__()
         self.snapshot, self.message = snapshot, message
         self.events: list[Event] = []
+        self.cookbook: list[list] = []   # [op, params] of each save and export (COOKBOOK_OPS), kept in the project
         self.agent_calls = 0    # Agent tool calls under way on this window
         self.forced_who = None  # A test harness acting as the user, whatever runs meanwhile
         self.head = 0           # The event whose state is the window's now
@@ -88,6 +90,7 @@ class History(QObject):
         self._timer.stop()
         self._op, self._params, self._snap = None, {}, None
         self.events.clear()
+        self.cookbook.clear()
         self.head = 0
         self.changed.emit()
 
@@ -120,6 +123,8 @@ class History(QObject):
 
     def log(self, op: str, text: str, params: dict | None = None) -> Event:
         self.flush()
+        if op in COOKBOOK_OPS:
+            self.cookbook.append([op, params or {}])
         return self._add(op, text, params or {}, self.snapshot())
 
     def _add(self, op, text, params, snap, base: int | None = None) -> Event:

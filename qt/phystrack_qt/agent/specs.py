@@ -22,7 +22,9 @@ METHODS = ["offline", "blob_background", "blob", "nanotrack"]
 
 SPECS = {
     "windows": ("Open windows: id, video, last event; cur = yours.", {}, "r"),
-    "videos": ("Videos in the current video's folder, and which window has each open.", {}, "r"),
+    "videos": ("Videos in the current video's folder, and which window has each open. A trial's project "
+               "file (.phystrack, marked project) holds its setup, plots and saves: open it to use that "
+               "trial's work as a source.", {}, "r"),
     "state": ("A window's setup: trim, ruler, axes, objects, plots and fits.", {}, "r"),
     "history": ("A window's events after #since: [n, u|a (user|agent), op, text, params].",
                 {"since": "int?"}, "r"),
@@ -33,7 +35,8 @@ SPECS = {
              {"n": "int?", "kind": "str?", "points": "int?"}, "r"),
     "resume": ("After the user stopped you (Space): lets you go on. Returns what they changed.", {}, "r"),
     "open": ("Open a video (name from videos, or a path) in a new window, shown to the user; it "
-             "becomes your current window.", {"video": "str"}, ""),
+             "becomes your current window. A project file opens that trial's setup and saves, to use "
+             "as a source.", {"video": "str"}, ""),
     "run_recipe": ("Do recipe(src) on the current window, step by step, checking each; returns each "
                    "step's result. only: the object numbers to copy (default all). start: the step "
                    "to begin at (0 = first). Stops at a failed check: fix it or ask the user, then "
@@ -67,7 +70,8 @@ ALLOWED_WHEN_STOPPED = {name for name, (_, _, flags) in SPECS.items() if "r" in 
 
 INSTRUCTIONS = (
     "PhysTrackX: a video-tracking app, one trial video per window (w1, w2...). Every change is in a "
-    "window's history. To repeat the work of trial X (window wX) on trial Y: open(Y), then "
+    "window's history. To repeat the work of trial X on trial Y: open X's project file if it is not "
+    "open (a name from videos, marked project), so it is window wX; open(Y), then "
     "run_recipe(src=wX); if it stops at a check, ask the user or fix it, then run_recipe again with "
     "start=next. A result with a \"stopped\" key means the user pressed Space: make no more calls "
     "until they say to go on, then call resume first. Every tool also takes w (a window id; default "

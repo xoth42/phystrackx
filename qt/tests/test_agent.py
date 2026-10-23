@@ -14,7 +14,7 @@ import harness as h  # noqa: F401  (sets up Qt before PySide6 is imported)
 from PySide6.QtCore import QPointF, Qt  # noqa: E402
 from PySide6.QtTest import QTest  # noqa: E402
 
-from phystrack_qt import windows  # noqa: E402
+from phystrack_qt import project_file, windows  # noqa: E402
 from phystrack_qt.agent import bridge, specs  # noqa: E402
 from test_tracking import RADIUS, ball_path, make_clip  # noqa: E402
 
@@ -242,6 +242,31 @@ def test_tools() -> None:
         w.close()
 
 
+def test_cookbook_in_project() -> None:
+    # A trial's saves are kept in its project file: opened later, the project is a source for recipe
+    bridge.start()
+    w = setup_window()
+    w.history.log("save_plots", "Saved plot y of object 1", {"kind": "y", "n": 1, "T": 1.25, "r2": 0.98})
+    path = os.path.join(h.WORK, "cookbook trial.phystrack")
+    h.check("the project saves", w.save_project_file(path))
+    h.check("the saves are in the file", project_file.load(path).get("cookbook") ==
+            [["save_plots", {"kind": "y", "n": 1, "T": 1.25, "r2": 0.98}]], str(project_file.load(path).get("cookbook")))
+    w._dirty = False
+    w.close()   # Its folder has no open window now: the project is opened by its path
+    r = call("open", {"video": path})
+    wid = r.get("ok", {}).get("w")
+    h.check("the project opens in a window", wid is not None, str(r))
+    rec = call("recipe", {"src": wid}).get("ok", {})
+    h.check("the recipe of a project has its saves", ["save_plots", {}] in rec.get("steps", []) and
+            rec.get("source_fits") == {"1y": {"T": 1.25, "r2": 0.98}}, str(rec))
+    listing = call("videos").get("ok", {}).get("videos", [])
+    h.check("videos lists the project as one", "cookbook trial.phystrack (project)" in listing, str(listing))
+    shown = [row for row in call("windows").get("ok", []) if row["w"] == wid]
+    h.check("windows says which project a window is", shown and shown[0].get("project") == "cookbook trial.phystrack",
+            str(shown))
+    windows.get(wid).close()
+
+
 def test_specs() -> None:
     schema = specs.json_schema(specs.SPECS["mark"][1])
     h.check("schemas mark required parameters", schema["required"] == ["box"])
@@ -254,7 +279,7 @@ def test_specs() -> None:
 
 if __name__ == "__main__":
     h.app()
-    for test in (test_specs, test_history_and_revert, test_windows, test_tools):
+    for test in (test_specs, test_history_and_revert, test_windows, test_tools, test_cookbook_in_project):
         print(test.__name__)
         test()
     h.finish()
