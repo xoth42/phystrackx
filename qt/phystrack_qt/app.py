@@ -11,7 +11,7 @@ import sys
 from PySide6.QtCore import QTimer
 from PySide6.QtWidgets import QApplication
 
-from phystrack_qt import paths, windows
+from phystrack_qt import paths, recent, session, windows
 from phystrack_qt.main_window import MainWindow
 from phystrack_qt.version import __version__
 
@@ -30,9 +30,21 @@ def stop_on_ctrl_c(app: QApplication) -> QTimer:
     return wake
 
 
+def startup_files(files: list[str]) -> list[str]:
+    """What to open at start. Files given: those. None given: the windows that were open when the app was
+    last closed (session.py), or, on a first start with no record, the most recent project."""
+    if files:
+        return files
+    restored = session.restorable()
+    if restored is None:
+        return recent.load()[:1]
+    return restored
+
+
 def run(files: list[str]) -> None:
     """Opens the app. The first file opens in the main window; each further one in a window of its own.
-    Each file is a video (opened from its first frame) or a .phystrack project."""
+    Each file is a video (opened from its first frame) or a .phystrack project. With no files, the
+    last session's windows open again (startup_files)."""
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(name)s: %(message)s")
     app = QApplication(sys.argv)
     app.setApplicationName("PhysTrackX")
@@ -43,7 +55,7 @@ def run(files: list[str]) -> None:
     window = MainWindow(cache_dir=os.environ.get("PHYSTRACK_QT_CACHE") or paths.cache_dir())
     window.resize(1440, 900)
     window.show()
-    for k, path in enumerate(files):
+    for k, path in enumerate(startup_files(files)):
         target = window if k == 0 else windows.new_window()
         if path.endswith(".phystrack"):
             target.open_project_file(path)

@@ -13,6 +13,11 @@ phystrackx "path/to/Air Trial 1.mp4"      # a video, or a .phystrack project
 phystrackx --version
 ```
 
+From the repo root, a single script installs the app and installs uv first if it is missing:
+`sh install.sh` on macOS (PhysTrackX.app in /Applications, plus the `phystrackx` command; add
+`--no-app` for the command alone), `sh install.sh` on Linux (the `phystrackx` command), or
+`install.bat` on Windows (the command).
+
 `build.py dev` needs [uv](https://docs.astral.sh/uv/) and nothing else: uv makes the Python 3.12 and
 the dependencies, in its own folder, so no venv is set up by hand. Rerun it after changing
 `pyproject.toml`. For a packaged app (macOS `.dmg`, Windows `.zip`, Linux AppImage), see

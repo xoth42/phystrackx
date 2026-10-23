@@ -1,6 +1,8 @@
-# Qt app: installs the `phystrackx` command and runs the tests, on Windows, macOS and Linux.
-# Runs on every change to the app or the parent code it uses. Local equivalent:
-#   cd qt && uv run python build.py models && uv run python build.py test
+# Qt app: runs the installers the way a user would, then the tests, on Windows, macOS and Linux.
+# The installers are at the repo root: install.sh (macOS and Linux) and install.bat (Windows). Each runs
+# twice, to show that a second run replaces the first cleanly. The uninstaller runs last and must leave
+# nothing behind. Runs on every change to the app, the installers or the parent code it uses.
+# Local equivalent: sh install.sh && cd qt && uv run python build.py test
 name: Qt app CI
 
 on:
@@ -12,6 +14,8 @@ on:
       - "media/**"
       - "experiments/**"
       - "filters/**"
+      - "install.*"
+      - "uninstall.*"
       - ".github/workflows/qt-*.yml"
   pull_request:
     paths:
@@ -20,6 +24,8 @@ on:
       - "media/**"
       - "experiments/**"
       - "filters/**"
+      - "install.*"
+      - "uninstall.*"
       - ".github/workflows/qt-*.yml"
   workflow_dispatch:
 
@@ -38,6 +44,8 @@ jobs:
       run:
         shell: bash
         working-directory: qt
+    env:
+      PHYSTRACK_NO_PAUSE: "1"   # install.bat and uninstall.bat do not wait for a key press here
     steps:
       - uses: actions/checkout@v4
 
@@ -56,24 +64,61 @@ jobs:
       - name: Python
         run: uv python install 3.12
 
-      # Before the project is built: its wheel includes these models, so the fetch cannot need the project
-      - name: The models the app ships with
-        run: uv run --no-project --with colorlog python build.py models
+      # The installers fetch the models themselves; the wheel that installs the command needs them
+      - name: Install (first run)
+        working-directory: .
+        if: runner.os != 'Windows'
+        run: sh install.sh
 
-      - name: Install the command, as a user would
-        run: |
-          uv tool install --python 3.12 --force .
-          echo "$(uv tool dir --bin)" >> "$GITHUB_PATH"
+      - name: Install (first run, Windows)
+        working-directory: .
+        if: runner.os == 'Windows'
+        shell: cmd
+        run: install.bat
 
-      - name: The command starts (no Qt needed for --help and --version)
+      - name: Install again (replaces the first run)
+        working-directory: .
+        if: runner.os != 'Windows'
+        run: sh install.sh
+
+      - name: Install again (Windows; replaces the first run)
+        working-directory: .
+        if: runner.os == 'Windows'
+        shell: cmd
+        run: install.bat
+
+      - name: The command and the app start (no Qt needed for --help and --version)
         run: |
           "$(uv tool dir --bin)/phystrackx" --version
           "$(uv tool dir --bin)/phystrackx" --help
           set +e
           "$(uv tool dir --bin)/phystrackx" no-such-file.mp4
           test $? -eq 2
+          if [ "$(uname -s)" = Darwin ]; then
+            app=/Applications/PhysTrackX.app
+            test -d "$app" || app="$HOME/Applications/PhysTrackX.app"
+            "$app/Contents/MacOS/phystrackx" --version
+          fi
 
       - name: Tests
         env:
           PYTHONUTF8: "1"   # Windows prints the app's text (▸ and the like) in UTF-8
         run: uv run python build.py test
+
+      - name: Uninstall (leaves nothing behind)
+        working-directory: .
+        if: runner.os != 'Windows'
+        run: |
+          sh uninstall.sh --purge
+          test ! -e "$(uv tool dir --bin)/phystrackx"
+          test ! -e /Applications/PhysTrackX.app
+          test ! -e "$HOME/Applications/PhysTrackX.app"
+
+      - name: Uninstall (Windows)
+        working-directory: .
+        if: runner.os == 'Windows'
+        shell: cmd
+        run: |
+          uninstall.bat --purge
+          uv tool list 2>nul | findstr /b /c:"phystrackx " && exit /b 1
+          exit /b 0

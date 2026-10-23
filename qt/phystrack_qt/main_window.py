@@ -27,7 +27,7 @@ from PySide6.QtWidgets import (QDialog, QDockWidget, QFileDialog, QFrame, QHBoxL
 from core.autoruler import snap_ruler
 from core.units import parse_length
 
-from . import plot_warmup, project_file, recent, windows
+from . import plot_warmup, project_file, recent, session, windows
 from .axes_item import AxesItem
 from .history import History, HistoryPanel
 from .measure import export_csv, physical, track_series
@@ -108,6 +108,9 @@ class MainWindow(QMainWindow):
         # Menu: projects and export, as in the Tk app
         file_menu = self.menuBar().addMenu("File")
         self._action(file_menu, "New Window", lambda: windows.new_window(), "Ctrl+N")
+        self._action(file_menu, "New Tab", lambda: windows.new_window(), "Ctrl+T")   # A blank window: a tab
+        self._action(file_menu, "Close Tab", self.close_tab, "Ctrl+W")
+        self._action(file_menu, "Reopen Closed Tab", lambda: windows.reopen_closed(), "Ctrl+Shift+T")
         self._action(file_menu, "Open Video…", self.choose_video, "Ctrl+Shift+O")
         self._action(file_menu, "Open Project…", self.open_project, "Ctrl+O")
         self._action(file_menu, "Save Project", self.save_project, "Ctrl+S")
@@ -355,6 +358,7 @@ class MainWindow(QMainWindow):
         self._on_opened()
         self._dirty = False
         self._title()
+        session.update(self)
         name = os.path.basename(path)
         self.history.reset()   # A new video is a new history, starting from it
         self.history.log("open", f"Opened {name}", {"video": name})
@@ -501,6 +505,7 @@ class MainWindow(QMainWindow):
         self.history.reset()
         self.history.log("open", f"Opened project {os.path.basename(path)}",
                          {"project": os.path.basename(path)})
+        session.update(self)
         return True
 
     def _fill_recent_menu(self) -> None:
@@ -551,6 +556,7 @@ class MainWindow(QMainWindow):
         self._title()
         self.statusBar().showMessage(f"Saved the project to {os.path.abspath(path)}")
         self.history.log("save_project", f"Saved {os.path.basename(path)}", {"file": os.path.basename(path)})
+        session.update(self)
         return True
 
     def _project_state(self, boxes: bool = True) -> dict:
@@ -1630,11 +1636,53 @@ class MainWindow(QMainWindow):
         self.statusBar().showMessage(message)
 
     # --- Window ----------------------------------------------------------------------------------
+    _confirmed_close = False   # Set by close_tab, after its unsaved-changes check: the close does not ask again
+
     def closeEvent(self, event) -> None:
-        if self._confirm_discard():
+        if self._confirmed_close or self._confirm_discard():
             event.accept()
             if self.job is not None:
                 self.job.stop()
+            if self.source.path:
+                windows.remember_closed(self._closed_entry())
             windows.remove(self.wid)
+            session.forget(self.wid)
         else:
             event.ignore()
+
+    def close_tab(self) -> None:
+        """Cmd+W (Ctrl+W): closes this window, which is a tab, after the unsaved-changes check. The next window
+        opened comes to the front. The last window is not closed: it is replaced by a blank one, so the app
+        stays open."""
+        if not self._confirm_discard():
+            return
+        self._confirmed_close = True
+        following = windows.neighbour(self.wid)
+        if following is None:
+            blank = windows.new_window()
+            self.close()
+            windows.focus(blank)
+            return
+        windows.focus(windows.get(following))
+        self.close()
+
+    def _closed_entry(self) -> dict:
+        """What reopening a closed trial needs: its video, its project file if it has one, its setup as it was
+        (saved or not), and whether it had changes."""
+        return {"video": os.path.abspath(self.source.path), "project": self.project_path,
+                "state": self._project_state(), "dirty": self._dirty}
+
+    def restore_closed(self, entry: dict) -> bool:
+        """Puts a closed trial back on this window (see _closed_entry). False if its video cannot be opened."""
+        if not self.load_video(entry["video"]):
+            return False
+        self.history.paused = True   # Putting the setup back is one event, as opening a project is
+        try:
+            self._apply_state(entry["state"])
+        finally:
+            self.history.paused = False
+        self.project_path = entry["project"]
+        self._dirty = entry["dirty"]
+        self._title()
+        session.update(self)
+        return True

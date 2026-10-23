@@ -190,7 +190,8 @@ def install() -> None:
     if not os.access("/Applications", os.W_OK):
         target = os.path.join(os.path.expanduser("~/Applications"), f"{APP_NAME}.app")
         os.makedirs(os.path.dirname(target), exist_ok=True)
-    shutil.rmtree(target, ignore_errors=True)
+    if os.path.lexists(target):
+        shutil.rmtree(target)   # The earlier install, replaced; an error here stops the install
     shutil.copytree(source, target, symlinks=True)
     link_cli(os.path.join(target, "Contents", "MacOS", "phystrackx"))
     print(f"Installed {target}")

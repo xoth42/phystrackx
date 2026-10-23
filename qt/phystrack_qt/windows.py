@@ -20,6 +20,8 @@ from phystrack_qt import paths
 _windows: dict = {}          # id -> MainWindow, in the order they were opened
 _ids = itertools.count(1)
 active: str | None = None    # The window the user last brought to the front
+closed: list[dict] = []      # Trials closed during this run, most recent last (see MainWindow._closed_entry)
+CLOSED_LIMIT = 20
 
 
 def add(window) -> str:
@@ -41,6 +43,36 @@ def activated(wid: str) -> None:
     global active
     if wid in _windows:
         active = wid
+
+
+def neighbour(wid: str) -> str | None:
+    """The window opened after `wid`, else the one before it: the tab to show when `wid` closes. None if
+    `wid` is the only window."""
+    ids = list(_windows)
+    if wid not in ids or len(ids) < 2:
+        return None
+    i = ids.index(wid)
+    return ids[i + 1] if i + 1 < len(ids) else ids[i - 1]
+
+
+def remember_closed(entry: dict) -> None:
+    closed.append(entry)
+    del closed[:-CLOSED_LIMIT]
+
+
+def reopen_closed():
+    """Reopens the last trial closed (Cmd+Shift+T) in a new window, as it was when closed. Trials whose video
+    is gone are passed over. Returns the window, or None if nothing can be reopened."""
+    while closed:
+        entry = closed.pop()
+        if not os.path.isfile(entry["video"]):
+            continue
+        window = new_window()
+        if window.restore_closed(entry):
+            focus(window)
+            return window
+        window.close()
+    return None
 
 
 def get(wid: str | None = None):
