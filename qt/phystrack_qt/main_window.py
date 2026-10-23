@@ -1483,7 +1483,7 @@ class MainWindow(QMainWindow):
             self.agent_label.setText("🤖 Agent stopped: tell it to resume")
             self.agent_label.show()
         elif gate.running():
-            self.agent_label.setText("🤖 Agent working: Space stops it")
+            self.agent_label.setText("Agent running, 'space' to stop")
             self.agent_label.show()
             if gate.calls == 0:   # Idle: the label goes once it counts as not working any more
                 QTimer.singleShot(int(gate.ACTIVE_S * 1000) + 200, self._show_agent)

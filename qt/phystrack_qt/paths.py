@@ -24,3 +24,9 @@ def projects_dir() -> str:
     """Projects of a video whose folder is read-only."""
     home = os.environ.get("PHYSTRACK_QT_HOME")
     return os.path.join(home, "projects") if home else os.path.join(user_data_dir(APP_NAME, appauthor=False), "projects")
+
+
+def runner_dir() -> str:
+    """Ollama, when the app installs it for the assistant (agent/runner.py), and its log."""
+    home = os.environ.get("PHYSTRACK_QT_HOME")
+    return os.path.join(home, "ollama") if home else os.path.join(user_data_dir(APP_NAME, appauthor=False), "ollama")

@@ -24,10 +24,7 @@ class ScriptedModel:
 
     def __init__(self, turns: list) -> None:
         self.turns, self.sent = list(turns), []
-        self.url, self.model = "scripted", "scripted"
-
-    def start_runner(self) -> bool:
-        return True
+        self.url, self.model, self.is_ollama = "scripted", "scripted", False
 
     def models(self) -> list:
         return ["scripted"]
@@ -98,8 +95,7 @@ def test_assistant() -> None:
     h.pump(timeout=0.2)
     w._space()
     h.check("Space stops it while it thinks", run_until(session, ("stopped",)))
-    h.check("while stopped, the banner is gone and Start is offered",
-            not panel.banner.isVisible() and panel.stop_btn.text() == "Start")
+    h.check("while stopped, Start is offered", panel.stop_btn.text() == "Start")
     w._trim_marks = [3, 60]
     w._apply_trim()
     h.pump(timeout=0.5)
@@ -119,6 +115,21 @@ def test_assistant() -> None:
     results = [m["content"] for m in session.messages if m["role"] == "tool"][-2:]
     h.check("errors and unknown tools are reported to the model, not raised",
             "no tool" in results[0] and "unknown kinds" in results[1], str(results))
+
+    # A click anywhere else takes the text box's selection away (not only a click on the video)
+    from PySide6.QtCore import QEvent, QPointF, Qt
+    from PySide6.QtGui import QMouseEvent
+    from PySide6.QtWidgets import QApplication
+    panel.input.setText("a draft")
+    panel.input.selectAll()
+    h.check("the text box has a selection to clear", panel.input.hasSelectedText())
+    press = QMouseEvent(QEvent.Type.MouseButtonPress, QPointF(2, 2), QPointF(2, 2), Qt.MouseButton.LeftButton,
+                        Qt.MouseButton.LeftButton, Qt.KeyboardModifier.NoModifier)
+    QApplication.sendEvent(panel.send_btn, press)
+    h.check("a click on a button elsewhere clears the selection", not panel.input.hasSelectedText())
+    panel.input.selectAll()
+    QApplication.sendEvent(panel.view.viewport(), press)
+    h.check("a click on the history clears the selection too", not panel.input.hasSelectedText())
     w._dirty = False
     w.close()
 

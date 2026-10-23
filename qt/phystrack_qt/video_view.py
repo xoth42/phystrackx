@@ -17,7 +17,7 @@ from PySide6.QtWidgets import (QGraphicsPixmapItem, QGraphicsScene, QGraphicsVie
 
 from .tracked_object import OutlineItem
 
-MAX_ZOOM = 8.0  # Times the fitted size, as in the Tk app
+MAX_ZOOM = 50.0  # Times the fitted size, as in the Tk app
 
 
 # "cpu" draws without OpenGL. Tests use it: Qt cannot capture an OpenGL view on macOS (grab() gives

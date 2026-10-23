@@ -2,23 +2,40 @@
 The Assistant dock, under the History: the conversation with the in-app assistant (session.py),
 a box to type in, and Stop / Start. Every window has one; they all show the one conversation.
 
-While the assistant works, a banner says that Space stops it. After Send, the keyboard goes back
-to the picture, so Space does that (in the text box, Space types a space). A question from the
-assistant shows its answers as buttons.
+While the assistant works, the main window's status bar says that Space stops it. After Send, the
+keyboard goes back to the picture, so Space does that (in the text box, Space types a space). A
+question from the assistant shows its answers as buttons. While it starts or thinks and no text has
+come yet, a blinking cursor shows that it is working.
 """
 
 import html
 import json
 import threading
 
-from PySide6.QtCore import Qt, Signal
-from PySide6.QtWidgets import (QComboBox, QHBoxLayout, QLabel, QLineEdit, QPushButton, QTextBrowser,
-                               QVBoxLayout, QWidget)
+from PySide6.QtCore import QEvent, QObject, Qt, QTimer, Signal
+from PySide6.QtWidgets import (QApplication, QComboBox, QHBoxLayout, QLabel, QLineEdit, QPushButton,
+                               QTextBrowser, QVBoxLayout, QWidget)
 
-STATES = {"idle": "ready", "thinking": "thinking…", "acting": "working…", "waiting": "asks you",
+STATES = {"setup": "setting up…", "thinking": "thinking…", "acting": "working…", "waiting": "asks you",
           "stopped": "stopped"}
-COLOURS = {"user": "#2b6cb0", "assistant": "#1a202c", "tool": "#6b7280", "result": "#6b7280",
-           "status": "#b7791f", "error": "#c53030", "ask": "#2f855a"}
+# Idle, the label is the model runner's status (runner.py): "ready" only when the runner answered
+RUNNER_TEXT = {"checking": "checking the model runner…", "starting": "starting Ollama…", "ready": "ready",
+               "no_model": "model not downloaded", "not_installed": "Ollama not installed",
+               "installing": "installing Ollama…", "downloading": "downloading the model…",
+               "down": "model runner not answering", "failed": "model runner failed"}
+
+
+class _ClickAway(QObject):
+    """Takes the selection out of the text box when the mouse is pressed anywhere else in the app."""
+
+    def __init__(self, box: QLineEdit) -> None:
+        super().__init__()
+        self.box = box
+
+    def eventFilter(self, watched, event) -> bool:
+        if event.type() == QEvent.Type.MouseButtonPress and watched is not self.box and self.box.hasSelectedText():
+            self.box.deselect()
+        return False
 
 
 class ChatPanel(QWidget):
@@ -48,11 +65,6 @@ class ChatPanel(QWidget):
         self.view.setOpenLinks(False)
         layout.addWidget(self.view, 1)
 
-        self.banner = QLabel("Assistant working: Space stops it")
-        self.banner.setStyleSheet("QLabel { color: white; background: #3a7bd5; padding: 2px 6px; }")
-        self.banner.hide()
-        layout.addWidget(self.banner)
-
         self.options = QHBoxLayout()   # A question's answers, as buttons
         layout.addLayout(self.options)
 
@@ -71,9 +83,19 @@ class ChatPanel(QWidget):
             bottom.addWidget(w, 1 if w is self.input else 0)
         layout.addLayout(bottom)
 
+        app = QApplication.instance()
+        click_away = _ClickAway(self.input)
+        app.installEventFilter(click_away)
+        self.input.destroyed.connect(lambda: app.removeEventFilter(click_away))   # Its panel is gone
+
         session.event.connect(self._on_event)
         session.state_changed.connect(self._on_state)
+        session.runner.changed.connect(self._on_runner)
         self._models_ready.connect(self._fill_models)
+        self._cursor_on = True
+        self._blink = QTimer(self)   # The cursor while the assistant starts or thinks
+        self._blink.timeout.connect(self._blink_cursor)
+        self._blink.start(500)
         self._render()
         self._on_state(session.state)
         threading.Thread(target=self._load_models, daemon=True).start()
@@ -83,11 +105,12 @@ class ChatPanel(QWidget):
         text = self.input.text()
         self.input.clear()
         model = self.model_box.currentText().strip()
-        if model and self.session.state == "idle":
+        if model and self.session.state == "idle" and model != self.session.llm.model:
             self.session.llm.model = model
+            self.session.runner.refresh()   # Is the new model downloaded?
         self.session.send(text)
         if self.focus_after_send is not None and self.session.state != "waiting":
-            self.focus_after_send.setFocus()   # So Space stops the assistant, as the banner says
+            self.focus_after_send.setFocus()   # So Space stops the assistant, as the status bar says
 
     def _stop_or_start(self) -> None:
         if self.session.state == "stopped":
@@ -112,17 +135,36 @@ class ChatPanel(QWidget):
         self._render()
 
     def _on_state(self, state: str) -> None:
-        self.state_label.setText(STATES.get(state, state))
-        working = state in ("thinking", "acting")
-        self.banner.setVisible(working)
+        self._refresh_label()
         self.stop_btn.setText("Start" if state == "stopped" else "Stop")
-        self.stop_btn.setEnabled(state != "idle")
+        self.stop_btn.setEnabled(state in ("thinking", "acting", "waiting", "stopped"))
         self.end_btn.setVisible(state == "stopped")
-        self.send_btn.setEnabled(state in ("idle", "waiting", "stopped"))
+        self.send_btn.setEnabled(state in ("idle", "setup", "waiting", "stopped"))
         self.model_box.setEnabled(state == "idle")
         if state == "idle":
             self._live = ""
             self._show_options([])
+        self._render()   # The cursor comes and goes with the state
+
+    def _on_runner(self, status: str, detail: str) -> None:
+        self._refresh_label()
+
+    def _refresh_label(self) -> None:
+        runner = self.session.runner
+        if self.session.state == "idle":
+            self.state_label.setText(RUNNER_TEXT.get(runner.status, runner.status))
+            self.state_label.setToolTip(runner.detail)
+        else:
+            self.state_label.setText(STATES.get(self.session.state, self.session.state))
+            self.state_label.setToolTip("")
+
+    def _waiting_for_text(self) -> bool:
+        """The assistant is starting or thinking, and no text has come yet."""
+        return self.session.state in ("setup", "thinking") and not self._live
+
+    def _blink_cursor(self) -> None:
+        if self._waiting_for_text():
+            self._cursor_on = not self._cursor_on
             self._render()
 
     def _show_options(self, options: list) -> None:
@@ -136,19 +178,19 @@ class ChatPanel(QWidget):
             self.options.addWidget(button)
 
     def _render(self) -> None:
+        # No colours: the text uses the window's own text colour, so it reads in light and dark themes alike
         rows = []
         for kind, text in self.session.transcript:
-            colour = COLOURS.get(kind, "#1a202c")
             if kind == "ask":
                 text = json.loads(text).get("q", "")
             body = html.escape(text).replace("\n", "<br>")
             prefix = {"user": "<b>You:</b> ", "assistant": "", "tool": "▸ ", "result": "&nbsp;&nbsp;",
                       "ask": "<b>?</b> ", "status": "", "error": "<b>!</b> "}.get(kind, "")
-            size = " font-size: small;" if kind in ("tool", "result") else ""
-            rows.append(f'<p style="margin: 2px 0; color: {colour};{size}">{prefix}{body}</p>')
+            rows.append(f'<p style="margin: 2px 0;">{prefix}{body}</p>')
         if self._live:
-            rows.append(f'<p style="margin: 2px 0; color: {COLOURS["assistant"]};">'
-                        f'{html.escape(self._live)}▍</p>')
+            rows.append(f'<p style="margin: 2px 0;">{html.escape(self._live)}▍</p>')
+        elif self._waiting_for_text() and self._cursor_on:
+            rows.append('<p style="margin: 2px 0;">▍</p>')
         self.view.setHtml("".join(rows))
         bar = self.view.verticalScrollBar()
         bar.setValue(bar.maximum())

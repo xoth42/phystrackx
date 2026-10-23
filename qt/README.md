@@ -97,8 +97,12 @@ A window with a left sidebar of buttons, the video view, and a seek bar.
   shell) on 127.0.0.1. The usual request is `open` the next trial, then `run_recipe` from the one
   done by hand. Space stops a working agent. See `../docs/AGENT_PLAN.md`.
 - **Assistant** (right bar, under the history): a local model (Ollama with `qwen3:4b-instruct` by
-  default, started when needed; any OpenAI-compatible runner through `PHYSTRACK_LLM_URL`) that uses
-  those tools: "do what I did in w1 on trials 2 to 4". Space stops it; Start goes on.
+  default; any OpenAI-compatible runner through `PHYSTRACK_LLM_URL`) that uses those tools: "do what
+  I did in w1 on trials 2 to 4". Space stops it; Start goes on. The app starts Ollama at launch and
+  stops it when the app quits (a server it did not start is left alone). If Ollama is missing, or
+  the model is not downloaded, the app asks (y or n) before installing or downloading anything
+  (macOS and Windows: into the app's own folder; Linux: the command is shown). Its label says
+  "ready" only when the runner answers. See `phystrack_qt/agent/runner.py`.
 
 Overlays are children of the picture item, so they are in frame pixels and follow zoom and pan
 without any coordinate code (in the Tk app, `ViewTransform` does this by hand).

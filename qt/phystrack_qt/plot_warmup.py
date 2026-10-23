@@ -26,6 +26,11 @@ def start() -> None:
     threading.Thread(target=_warm, name="plot warm-up", daemon=False).start()
 
 
+def warm_now() -> None:
+    """The warm-up on this thread, at once (the install's warm launch, app.warm_launch)."""
+    _warm()
+
+
 def _warm() -> None:
     try:
         import numpy as np

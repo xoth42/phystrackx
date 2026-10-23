@@ -194,7 +194,22 @@ def install() -> None:
         shutil.rmtree(target)   # The earlier install, replaced; an error here stops the install
     shutil.copytree(source, target, symlinks=True)
     link_cli(os.path.join(target, "Contents", "MacOS", "phystrackx"))
+    warm_launch(target)
     print(f"Installed {target}")
+
+
+def warm_launch(app_path: str) -> None:
+    """macOS: opens the installed app once, hidden, so its first real start is fast. The first time macOS
+    opens a new app it checks each program and library as it loads (XProtect, syspolicyd), which held the
+    window back about 5 s. Only a launch through LaunchServices (open, Finder, Spotlight) counts, not
+    running the program from a shell. The app loads everything, shows nothing, and quits
+    (app.warm_launch). A failure here only costs that wait, so it does not stop the install."""
+    print("Opening the app once, hidden, so macOS checks it now rather than at its first start…", flush=True)
+    try:
+        subprocess.run(["open", "-W", "-n", "-g", "-j", "-a", app_path, "--args", "--warm-launch"],
+                       check=True, timeout=180)
+    except (OSError, subprocess.SubprocessError) as e:
+        print(f"Skipped ({e}); the first start may take a few seconds longer.")
 
 
 def link_cli(executable: str) -> None:

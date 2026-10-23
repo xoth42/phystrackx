@@ -19,6 +19,8 @@ def parse(argv: list[str]) -> argparse.Namespace:
     parser.add_argument("--version", action="version", version=f"phystrackx {__version__}")
     parser.add_argument("files", nargs="*", metavar="FILE",
                         help="a video to open, or a .phystrack project")
+    # The install's hidden launch (build.py warm_launch): load everything, show nothing, quit
+    parser.add_argument("--warm-launch", action="store_true", help=argparse.SUPPRESS)
     args = parser.parse_args(argv)
     for path in args.files:
         if not os.path.isfile(path):
@@ -30,4 +32,7 @@ def parse(argv: list[str]) -> argparse.Namespace:
 def main(argv: list[str] | None = None) -> None:
     args = parse(sys.argv[1:] if argv is None else argv)
     from phystrack_qt import app   # Qt is loaded only now
-    app.run(args.files)
+    if args.warm_launch:
+        app.warm_launch()
+    else:
+        app.run(args.files)

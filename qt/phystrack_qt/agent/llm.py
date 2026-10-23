@@ -13,14 +13,11 @@ Standard library only. It streams, so a reply shows as it is written and Stop cu
 - llama.cpp's llama-server, LM Studio, vLLM: their /v1 URL.
 
 PHYSTRACK_LLM_URL and PHYSTRACK_LLM_MODEL choose (the assistant panel also lists the runner's
-models).
+models). Finding, starting and stopping the runner is runner.py's job; this module only talks to it.
 """
 
 import json
 import os
-import shutil
-import subprocess
-import time
 import urllib.error
 import urllib.request
 
@@ -56,28 +53,6 @@ class LLM:
         """The runner's models (raises OSError if it cannot be reached)."""
         with self._open("/models", timeout=3.0) as response:
             return sorted(m["id"] for m in json.loads(response.read()).get("data", []))
-
-    def reachable(self) -> bool:
-        try:
-            self.models()
-            return True
-        except (OSError, ValueError):
-            return False
-
-    def start_runner(self) -> bool:
-        """Starts Ollama when it is the runner, installed and not running (the model stays loaded
-        for 30 minutes after use). True if the runner can be reached."""
-        if self.reachable():
-            return True
-        if not self.is_ollama or not shutil.which("ollama"):
-            return False
-        subprocess.Popen(["ollama", "serve"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
-                         start_new_session=True, env={**os.environ, "OLLAMA_KEEP_ALIVE": "30m"})
-        for _ in range(60):
-            time.sleep(0.25)
-            if self.reachable():
-                return True
-        return False
 
     def chat(self, messages: list, tools: list, on_text=None, cancelled=None,
              max_tokens: int = 400) -> dict:

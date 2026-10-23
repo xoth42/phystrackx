@@ -12,6 +12,7 @@ from PySide6.QtCore import QTimer
 from PySide6.QtWidgets import QApplication
 
 from phystrack_qt import paths, recent, session, windows
+from phystrack_qt.agent import session as agent_session
 from phystrack_qt.main_window import MainWindow
 from phystrack_qt.version import __version__
 
@@ -55,6 +56,40 @@ def run(files: list[str]) -> None:
     window = MainWindow(cache_dir=os.environ.get("PHYSTRACK_QT_CACHE") or paths.cache_dir())
     window.resize(1440, 900)
     window.show()
+    # Nothing else runs before the event loop: until it runs the window is not painted, and macOS does not
+    # bring the app forward. The trials, the bridge and the assistant start on its first turn instead.
+    QTimer.singleShot(0, lambda: start_at_launch(app, window, files))
+    sys.exit(app.exec())
+
+
+def warm_launch() -> None:
+    """The install's hidden launch (build.py warm_launch). The first time macOS opens a new app, it checks
+    each program and library as it loads (XProtect, syspolicyd): about 5 s for this app, before its window
+    shows. Loading them all here, with no window and nothing saved, moves that wait into the install.
+    Loads what a start loads (Qt, the main window and its modules), what the plots load, and ffmpeg."""
+    import subprocess
+    import tempfile
+
+    from core import find_ffmpeg
+    from phystrack_qt import plot_warmup
+
+    os.environ["QT_QPA_PLATFORM"] = "offscreen"   # Nothing is shown
+    with tempfile.TemporaryDirectory() as home:
+        os.environ["PHYSTRACK_QT_HOME"] = home     # Nothing goes to the user's cache, recent list or session
+        app = QApplication(sys.argv)   # noqa: F841  (the main window needs one)
+        MainWindow(cache_dir=paths.cache_dir())
+        plot_warmup.warm_now()
+        try:
+            subprocess.run([find_ffmpeg(), "-version"], capture_output=True, timeout=60)
+        except (OSError, subprocess.TimeoutExpired):
+            pass
+
+
+def start_at_launch(app: QApplication, window, files: list[str]) -> None:
+    """On the event loop's first turn: brings the window to the front, opens the trials, then starts the
+    agent tools and the assistant. Stops the assistant's model runner when the app quits (not when a
+    window closes)."""
+    windows.focus(window)
     for k, path in enumerate(startup_files(files)):
         target = window if k == 0 else windows.new_window()
         if path.endswith(".phystrack"):
@@ -65,4 +100,6 @@ def run(files: list[str]) -> None:
     if os.environ.get("PHYSTRACK_BRIDGE", "1") != "0":
         from phystrack_qt.agent import bridge
         bridge.start()
-    sys.exit(app.exec())
+    assistant = agent_session.shared()
+    app.aboutToQuit.connect(assistant.shutdown)
+    assistant.warm_up()

@@ -13,6 +13,9 @@ Its lifetime, kept simple so a small model cannot get it wrong:
 - Stop (Space, or the button) cuts off the reply being written or the tool call under way, and
   the session waits. Start (with a note, if typed) calls resume and tells the model what the user
   changed meanwhile, then goes on. End drops the request.
+- The model runner (runner.py) is made ready at launch (setup) and before each request. Ollama
+  missing, or its model not downloaded: a question asks (y or n) before anything is installed or
+  downloaded. Declined, the request says why.
 
 QUICK-AND-DIRTY (see docs/AGENT_PLAN.md): one module-level session; context is trimmed by
 message count, not tokens; the transcript is re-rendered whole on each change.
@@ -26,6 +29,7 @@ from PySide6.QtCore import QObject, Signal
 from .. import windows
 from . import bridge
 from .llm import LLM, Cancelled, LLMError
+from .runner import Runner
 from .specs import SPECS, json_schema
 
 MODEL_TOOLS = ["windows", "videos", "state", "recipe", "open", "run_recipe", "plots", "data", "revert"]
@@ -103,12 +107,13 @@ class _Ended(Exception):
 
 class AgentSession(QObject):
     event = Signal(str, str)       # (kind, text): user | assistant | part | tool | result | ask | status | error | clear
-    state_changed = Signal(str)    # idle | thinking | acting | waiting | stopped
+    state_changed = Signal(str)    # idle | setup | thinking | acting | waiting | stopped
 
     def __init__(self, llm=None) -> None:
         super().__init__()
         bridge.ensure_invoker()
         self.llm = llm or LLM()
+        self.runner = Runner(self.llm)
         self.tools = tool_defs()
         self.messages: list = []         # The conversation, without the system prompt
         self.transcript: list = []       # (kind, text) as the docks show it
@@ -131,6 +136,11 @@ class AgentSession(QObject):
                 self._answer = text
                 self._set_state("thinking")   # At once: a second click or Enter answers nothing
                 self._answered.set()
+            return
+        if self.state == "setup":
+            if text:
+                self._emit("status", "The model runner is still being set up. "
+                                     "Send your message when it is ready.")
             return
         if self.state == "stopped":
             if text:
@@ -165,13 +175,65 @@ class AgentSession(QObject):
             self.transcript.clear()
             self.event.emit("clear", "")
 
+    def warm_up(self) -> None:
+        """At launch: brings the model runner up in the background, so the first request does not
+        wait for it. An install or a download is asked for first, in the dock."""
+        self.runner.start()
+        if self.state == "idle":
+            self._set_state("setup")
+            threading.Thread(target=self._setup, name="assistant-setup", daemon=True).start()
+
+    def shutdown(self) -> None:
+        """At quit: stops the server the app started (not one it found running)."""
+        self.runner.stop()
+
     # --- The worker thread -------------------------------------------------------------------------
+    def _setup(self) -> None:
+        try:
+            self._ready_runner(report=False)
+        finally:
+            self._busy(False)
+            self._set_state("idle")
+
+    def _ready_runner(self, report: bool) -> bool:
+        """Makes the model runner ready, asking (y or n) before an install or a download. When it
+        cannot, the reason goes to the transcript if report is set; the dock's label shows it either way."""
+        for _ in range(4):   # Install, start, download: three rounds at most, and one spare
+            if self.runner.ensure():
+                return True
+            status = self.runner.status
+            if status == "not_installed" and self.runner.install_prompt() is None:
+                self.runner.install()   # Linux: nothing to ask; its install() sets the command as the detail
+                question = None
+            elif status == "not_installed":
+                question, action = self.runner.install_prompt(), self.runner.install
+            elif status == "no_model":
+                question, action = self.runner.pull_prompt(), self.runner.pull
+            else:
+                question = None
+            if question is None:   # Nothing to ask: the runner cannot be started from here
+                if report:
+                    self._emit("error", self.runner.detail)
+                return False
+            if not self._yes(question):
+                if report:
+                    self._emit("error", f"The assistant cannot answer without it: {self.runner.detail}.")
+                return False
+            if not action():
+                if report:
+                    self._emit("error", self.runner.detail)
+                return False
+        return False
+
+    def _yes(self, question: str) -> bool:
+        """Asks a yes-or-no question: the answer is y or n, typed or on a button."""
+        reply = self._ask({"question": question, "options": ["y", "n"]})
+        return str(reply.get("answer", "")).strip().lower() in ("y", "yes")
+
     def _run(self) -> None:
         self._busy(True)
         try:
-            if not self.llm.start_runner():
-                self._emit("error", f"No model runner at {self.llm.url}. Start it (ollama serve), or "
-                                    "set PHYSTRACK_LLM_URL to another (Strata, llama-server...).")
+            if not self._ready_runner(report=True):
                 return
             nudges = 0
             for _ in range(MAX_CALLS):
