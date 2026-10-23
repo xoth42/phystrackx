@@ -13,7 +13,6 @@ from PySide6.QtWidgets import QApplication
 
 from phystrack_qt import paths, recent, session, windows
 from phystrack_qt.agent import session as agent_session
-from phystrack_qt.main_window import MainWindow
 from phystrack_qt.version import __version__
 
 
@@ -43,7 +42,7 @@ def startup_files(files: list[str]) -> list[str]:
 
 
 def run(files: list[str]) -> None:
-    """Opens the app. The first file opens in the main window; each further one in a window of its own.
+    """Opens the app. The first file opens in the first tab; each further one in a tab of its own.
     Each file is a video (opened from its first frame) or a .phystrack project. With no files, the
     last session's windows open again (startup_files)."""
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(name)s: %(message)s")
@@ -53,9 +52,8 @@ def run(files: list[str]) -> None:
     app.setApplicationVersion(__version__)
 
     wake = stop_on_ctrl_c(app)   # noqa: F841  (kept alive for the run)
-    window = MainWindow(cache_dir=os.environ.get("PHYSTRACK_QT_CACHE") or paths.cache_dir())
-    window.resize(1440, 900)
-    window.show()
+    # The first trial, in a tab of the first window
+    window = windows.new_window(cache_dir=os.environ.get("PHYSTRACK_QT_CACHE") or paths.cache_dir())
     # Nothing else runs before the event loop: until it runs the window is not painted, and macOS does not
     # bring the app forward. The trials, the bridge and the assistant start on its first turn instead.
     QTimer.singleShot(0, lambda: start_at_launch(app, window, files))
@@ -77,7 +75,7 @@ def warm_launch() -> None:
     with tempfile.TemporaryDirectory() as home:
         os.environ["PHYSTRACK_QT_HOME"] = home     # Nothing goes to the user's cache, recent list or session
         app = QApplication(sys.argv)   # noqa: F841  (the main window needs one)
-        MainWindow(cache_dir=paths.cache_dir())
+        windows.new_window(show=False, cache_dir=paths.cache_dir())   # The tab window and a trial in it
         plot_warmup.warm_now()
         try:
             subprocess.run([find_ffmpeg(), "-version"], capture_output=True, timeout=60)

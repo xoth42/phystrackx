@@ -1,6 +1,7 @@
 """
-Tabs (each is a window): Cmd+W closes the current one and shows the next; the last one is replaced by a
-blank one. Cmd+T opens a blank one. Cmd+Shift+T reopens the last closed one, with its setup as it was.
+Tabs: Cmd+W closes the current one and shows the next; the last one is replaced by a blank one. Cmd+T opens
+a blank one. Cmd+Shift+T reopens the last closed one, with its setup as it was. In the app the tabs sit in
+a tab bar (tab_window.py), named after their trial; a MainWindow made on its own (h.window) has none.
 
     uv run python tests/test_tabs.py
 """
@@ -21,7 +22,142 @@ def close_all() -> None:
     for w in list(windows.all_windows().values()):
         w._dirty = False
         w.close()
+    for host in windows.hosts():
+        host.close()
+    h.pump(timeout=0.1)
     windows.closed.clear()
+
+
+def tab_texts(host) -> list[str]:
+    return [host.tabs.tabText(i) for i in range(host.tabs.count())]
+
+
+def test_tab_bar_names_each_trial() -> None:
+    close_all()
+    first = windows.new_window()
+    host = first.host
+    h.check("a new window is a tab of a tab window", host is not None and host.trials() == [first])
+    h.check("...named New Tab while blank", tab_texts(host) == ["New Tab"], str(tab_texts(host)))
+    clip = make_clip()
+    first.load_video(clip)
+    h.check("...then after its video", tab_texts(host) == [os.path.basename(clip)], str(tab_texts(host)))
+    second = windows.new_window()
+    h.check("New Tab adds a tab to the same window", second.host is host and host.trials() == [first, second])
+    h.check("...and shows it", host.current() is second and windows.get() is second)
+    first._touch()
+    h.check("unsaved changes star the tab", tab_texts(host)[0] == os.path.basename(clip) + " *", str(tab_texts(host)))
+    windows.focus(first)
+    h.check("focus shows that trial's tab", host.current() is first)
+    h.check("...and the window title is the tab's", host.windowTitle() == first.windowTitle(), host.windowTitle())
+    first._dirty = False
+    close_all()
+
+
+def test_menus_follow_the_tab() -> None:
+    close_all()
+    first, second = windows.new_window(), windows.new_window()
+    host = first.host
+    menus = lambda: [a.menu() for a in host.menuBar().actions()]   # noqa: E731
+    h.check("the menu bar has the shown tab's menus", second.menuBar().actions()[0].menu() in menus())
+    h.check("...not the other tab's", first.menuBar().actions()[0].menu() not in menus())
+    h.check("...and the Window menu", host.window_menu in menus())
+    windows.focus(first)
+    h.check("switching tabs switches the menus", first.menuBar().actions()[0].menu() in menus()
+            and second.menuBar().actions()[0].menu() not in menus())
+    h.check("a tab's own menu bar is hidden", not first.menuBar().isVisible())
+    close_all()
+
+
+def test_tab_bar_close_and_step() -> None:
+    close_all()
+    a, b, c = windows.new_window(), windows.new_window(), windows.new_window()
+    host = a.host
+    windows.focus(b)
+    host.step(1)
+    h.check("Next Tab shows the one to the right", host.current() is c)
+    host.step(1)
+    h.check("...round the end", host.current() is a)
+    host.select(9)
+    h.check("Ctrl+9 shows the last tab", host.current() is c)
+    windows.focus(b)
+    host.tabs.tabCloseRequested.emit(host.tabs.indexOf(b))
+    h.pump(timeout=0.1)
+    h.check("the close button closes that tab", host.trials() == [a, c], str([t.wid for t in host.trials()]))
+    h.check("...and shows the one to its right", host.current() is c)
+    h.check("...and the trial is gone", b.wid not in windows.all_windows())
+    c.close_tab()
+    a.close_tab()
+    h.pump(timeout=0.1)
+    h.check("closing the last tab leaves a blank one in the same window",
+            len(host.trials()) == 1 and host.trials()[0].source.path in (None, "") and host.isVisible())
+    close_all()
+
+
+def test_new_window_and_its_last_tab() -> None:
+    close_all()
+    first = windows.new_window()
+    other = windows.new_window(separate=True)
+    h.check("New Window opens a second tab window", other.host is not first.host and len(windows.hosts()) == 2)
+    host = other.host
+    other.close_tab()
+    h.pump(timeout=0.2)
+    h.check("closing the last tab of a second window closes that window",
+            host not in windows.hosts() and not host.isVisible())
+    h.check("...and leaves the first", windows.hosts() == [first.host])
+    close_all()
+
+
+def test_same_video_in_two_tabs_at_once() -> None:
+    """Two tabs opening one video with no proxy yet each make one; neither fails (they once shared a file)."""
+    import shutil
+    from phystrack_qt.video_source import VideoSource
+    cache = os.path.join(h.WORK, "cold_cache")
+    shutil.rmtree(cache, ignore_errors=True)
+    clip = make_clip()
+    sources = [VideoSource(cache), VideoSource(cache)]
+    failures = []
+    for source in sources:
+        source.failed.connect(failures.append)
+        source.load(clip)
+    h.pump(lambda: failures or all(s.has_proxy for s in sources), timeout=60)
+    h.check("both tabs get the proxy, with no failure", not failures and all(s.has_proxy for s in sources),
+            str(failures))
+    h.check("...and one proxy file is left in the cache", len(os.listdir(cache)) == 1, str(os.listdir(cache)))
+
+
+def test_file_menu_groups() -> None:
+    """The File menu is grouped as a browser's: new and open, then close and save, then export."""
+    close_all()
+    w = windows.new_window()
+    file_menu = [a for a in w.menuBar().actions() if a.text() == "File"][0].menu()
+    texts = ["---" if a.isSeparator() else a.text() for a in file_menu.actions()]
+    want = ["New Tab", "New Window", "Reopen Closed Tab", "Open Video…", "Open Project…", "Open Recent", "---",
+            "Close Window", "Close Tab", "Save Project", "Save Project As…", "---", "Export Data (CSV)…"]
+    h.check("File menu order and separators", texts == want, str(texts))
+    other = windows.new_window()
+    host = w.host
+    file_action(other, "Close Window").trigger()
+    h.pump(timeout=0.1)
+    h.check("Close Window closes the window and its tabs", not host.isVisible() and not windows.all_windows())
+    close_all()
+
+
+def test_closing_the_window_asks_per_tab() -> None:
+    close_all()
+    a, b = windows.new_window(), windows.new_window()
+    host = a.host
+    a._dirty = True
+    asked = []
+    real = MainWindow._confirm_discard
+    MainWindow._confirm_discard = lambda self: asked.append(self) or False   # The user chose Cancel
+    try:
+        h.check("Cancel keeps the window open", not host.close() and host.isVisible())
+        h.check("...having shown the unsaved tab first", asked == [a] and host.current() is a)
+    finally:
+        MainWindow._confirm_discard = real
+    a._dirty = False
+    h.check("closing it with nothing unsaved closes every tab", host.close() and not windows.all_windows())
+    close_all()
 
 
 def file_action(window, text: str):
@@ -92,7 +228,8 @@ def test_reopen_closed_restores_the_setup() -> None:
 def test_shortcuts() -> None:
     close_all()
     w = h.window()
-    keys = {"Close Tab": "Ctrl+W", "New Tab": "Ctrl+T", "Reopen Closed Tab": "Ctrl+Shift+T"}
+    keys = {"Close Tab": "Ctrl+W", "New Tab": "Ctrl+T", "Reopen Closed Tab": "Ctrl+Shift+T",
+            "New Window": "Ctrl+N", "Close Window": "Ctrl+Shift+W"}
     for text, key in keys.items():
         h.check(f"{text} is {key}", file_action(w, text).shortcut().toString() == key,
                 file_action(w, text).shortcut().toString())
@@ -102,7 +239,9 @@ def test_shortcuts() -> None:
 if __name__ == "__main__":
     h.app()
     for test in (test_close_tab_shows_the_next_window, test_closing_the_last_tab_shows_a_blank_one,
-                 test_new_tab_is_blank, test_reopen_closed_restores_the_setup, test_shortcuts):
+                 test_new_tab_is_blank, test_reopen_closed_restores_the_setup, test_shortcuts,
+                 test_tab_bar_names_each_trial, test_menus_follow_the_tab, test_tab_bar_close_and_step,
+                 test_new_window_and_its_last_tab, test_same_video_in_two_tabs_at_once, test_file_menu_groups, test_closing_the_window_asks_per_tab):
         print(test.__name__)
         test()
     h.finish()

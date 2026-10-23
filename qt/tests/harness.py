@@ -30,7 +30,9 @@ from PySide6.QtCore import QRectF  # noqa: E402
 from PySide6.QtGui import QImage, QPainter  # noqa: E402
 from PySide6.QtWidgets import QApplication  # noqa: E402
 
-WORK = os.path.join(tempfile.gettempdir(), "phystrack_qt_tests")
+# The test folder (clips, proxies, the recent list and the session). build.py test gives each test file its own,
+# so the files can run at once
+WORK = os.environ.get("PHYSTRACK_QT_TEST_WORK") or os.path.join(tempfile.gettempdir(), "phystrack_qt_tests")
 os.makedirs(WORK, exist_ok=True)
 os.environ["PHYSTRACK_QT_HOME"] = os.path.join(WORK, "home")  # The recent list stays out of the real one
 

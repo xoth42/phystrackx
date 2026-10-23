@@ -16,7 +16,7 @@ reads what the user changed and continues.
 | Part | Where | What |
 |---|---|---|
 | 1. Event history | `qt/phystrack_qt/history.py`, History dock in `main_window.py` | Every change is an event (op, text, who, params, snapshot). Clicking an event goes back to it. The revert is logged too, so clicking a later event goes forward again. Undone events are grey; the agent's are blue. |
-| 2. Windows | `qt/phystrack_qt/windows.py` | Any number of trial windows, ids `w1`, `w2`... (in the title). File > New Window (Ctrl+N). `run.py a.mp4 b.mp4 c.phystrack` opens one window per file. |
+| 2. Windows | `qt/phystrack_qt/windows.py` | Any number of trials, ids `w1`, `w2`... (in the title), each a tab (`tab_window.py`). File > New Tab (Ctrl+T), New Window (Ctrl+N). `run.py a.mp4 b.mp4 c.phystrack` opens one tab per file. |
 | 3. Recipe | `qt/phystrack_qt/agent/relocate.py`, `tools.recipe` | A window's work as tool calls: `copy_setup`, `track`, `plots`, then the saves and exports in the order they were done. `copy_setup` finds the ruler, axes, ball and trim again in the new video (below). |
 | 4. Tools | `qt/phystrack_qt/agent/` (`specs.py`, `tools.py`, `bridge.py`, `mcp_server.py`, `ptx.py`) | 21 tools over a localhost bridge in the app. They are served to MCP clients by a stdio shim, and to shells and scripts by `ptx.py`. Space stops a working agent. |
 

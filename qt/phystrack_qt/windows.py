@@ -1,8 +1,10 @@
 """
 Every open trial window, by a short id ("w1", "w2", ...), and the agent gate (Space stops an agent).
 
-Any number of windows: each is one video (one trial) with its own setup and history. The agent
-tools name windows by id; File > New Window (Ctrl+N) opens another.
+Any number of trial windows: each is one video (one trial) with its own setup and history. The agent
+tools name them by id. In the app each is a tab of a TabWindow (tab_window.py): File > New Tab (Ctrl+T)
+adds one to the window in front, File > New Window (Ctrl+N) opens another TabWindow. A MainWindow made
+directly (as the tests do) is a window of its own, with no tab bar.
 
 QUICK-AND-DIRTY (see docs/AGENT_PLAN.md, "Architecture notes"): a module-level registry, one per
 process, rather than an application/document model passed around. Ids are never reused within a
@@ -20,6 +22,7 @@ from phystrack_qt import paths
 _windows: dict = {}          # id -> MainWindow, in the order they were opened
 _ids = itertools.count(1)
 active: str | None = None    # The window the user last brought to the front
+_hosts: list = []            # The open TabWindows, oldest first
 closed: list[dict] = []      # Trials closed during this run, most recent last (see MainWindow._closed_entry)
 CLOSED_LIMIT = 20
 
@@ -75,6 +78,27 @@ def reopen_closed():
     return None
 
 
+def add_host(host) -> None:
+    _hosts.append(host)
+
+
+def remove_host(host) -> None:
+    if host in _hosts:
+        _hosts.remove(host)
+
+
+def hosts() -> list:
+    return list(_hosts)
+
+
+def _front_host():
+    """The TabWindow of the active trial, else the newest one open, else None."""
+    window = get()
+    if window is not None and window.host is not None:
+        return window.host
+    return _hosts[-1] if _hosts else None
+
+
 def get(wid: str | None = None):
     """The window `wid` (None: the active one), or None."""
     return _windows.get(wid or active) if (wid or active) else None
@@ -84,15 +108,23 @@ def all_windows() -> dict:
     return dict(_windows)
 
 
-def new_window(path: str | None = None, show: bool = True):
-    """A new, empty window (with the same proxy cache as the others), opening `path` if given (a
-    video or a project)."""
+def new_window(path: str | None = None, show: bool = True, separate: bool = False, host=None,
+               cache_dir: str | None = None):
+    """A new, empty trial (with the same proxy cache as the others), opening `path` if given (a video or a
+    project). It is a new tab of `host`, else of the window in front; `separate` (or no window open) puts
+    it in a new window. `show`: the tab is shown and its window too."""
     from .main_window import MainWindow
-    cache = next(iter(_windows.values())).cache_dir if _windows else paths.cache_dir()
+    from .tab_window import TabWindow
+    cache = cache_dir or (next(iter(_windows.values())).cache_dir if _windows else paths.cache_dir())
+    host = host or (None if separate else _front_host())
+    if host is None:
+        host = TabWindow()
+        host.resize(1440, 900)
     window = MainWindow(cache)
-    window.resize(1440, 900)
+    host.add(window, select=show)
     if show:
-        window.show()
+        host.show()
+        activated(window.wid)
     if path:
         if path.endswith(".phystrack"):
             window.open_project_file(path)
@@ -102,10 +134,15 @@ def new_window(path: str | None = None, show: bool = True):
 
 
 def focus(window) -> None:
-    """Brings `window` to the front: the user's view follows the agent to it."""
-    window.show()
-    window.raise_()
-    window.activateWindow()
+    """Brings `window` to the front (its tab, and the window the tab is in): the user's view follows the
+    agent to it."""
+    front = window
+    if window.host is not None:
+        window.host.show_tab(window)
+        front = window.host
+    front.show()
+    front.raise_()
+    front.activateWindow()
     activated(window.wid)
 
 

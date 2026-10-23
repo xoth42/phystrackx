@@ -108,9 +108,15 @@ class VideoSource(QObject):
         return True
 
     def _make_proxy(self, path: str, out: str, width: int, total: int, job: int) -> None:
+        # Made under a name of its own, then moved into place: two tabs opening the same video at once each make
+        # one, and with one name (and one temporary file) the second's rename failed
+        own = f"{os.path.splitext(out)[0]}.{os.getpid()}-{id(self)}-{job}.mp4"
         try:
-            made = proxyvideo(path, width=width, writepath=out, on_progress=self.progress.emit,
+            made = proxyvideo(path, width=width, writepath=own, on_progress=self.progress.emit,
                               total_frames=total)
+            if made is not None:
+                os.replace(made, out)
+                made = out
         except Exception as e:  # Reported to the user rather than lost on the worker thread
             made = None
             self.failed.emit(f"Making the proxy failed: {e}")

@@ -91,8 +91,11 @@ A window with a left sidebar of buttons, the video view, and a seek bar.
   again. The track before that frame is kept; only the part from there on is tracked again.
 - **History** (right bar, under the objects): every change is an event. Click one to go back to it;
   the revert is logged too, so clicking a later event goes forward again. The agent's events are blue.
-- **Windows**: one trial per window, as many as wanted (File > New Window, Ctrl+N; or several files
-  on the command line). Each has an id (`w1`, `w2`...) in its title.
+- **Tabs**: one trial per tab, as many as wanted, in a tab bar named after each trial's project or video
+  (`*` when unsaved). File > New Tab (Ctrl+T) adds one, Close Tab (Ctrl+W) or the tab's × closes one,
+  Reopen Closed Tab (Ctrl+Shift+T) brings it back; Window > Next/Previous Tab (Control+Tab) and Ctrl+1..9
+  switch. File > New Window (Ctrl+N) opens another window of tabs. Several files on the command line open
+  one tab each. Each trial has an id (`w1`, `w2`...) in the window title and the tab's tooltip.
 - **Agent tools**: the app serves its tools to agents (MCP, or `phystrack_qt/agent/ptx.py` from a
   shell) on 127.0.0.1. The usual request is `open` the next trial, then `run_recipe` from the one
   done by hand. Space stops a working agent. See `../docs/AGENT_PLAN.md`.

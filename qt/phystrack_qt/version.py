@@ -6,4 +6,4 @@ this string (the release workflow checks it). The project file's format has its 
 (project_file.VERSION); the two change independently.
 """
 
-__version__ = "0.1.1"
+__version__ = "0.1.2"

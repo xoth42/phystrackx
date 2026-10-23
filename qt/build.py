@@ -6,7 +6,7 @@ environment from pyproject.toml and uv.lock, so no venv is set up by hand:
     uv run python build.py dev       Install `phystrackx` for development: on PATH, running this
                                      folder's code, so edits need no reinstall (rerun after a
                                      change to pyproject.toml, such as a new dependency or command)
-    uv run python build.py test      Run the test scripts
+    uv run python build.py test      Run the test scripts, several at once (PHYSTRACK_TEST_JOBS=1: one at a time)
     uv run python build.py models    Download the models the app ships with, if missing (the
                                      release build and the wheel need them)
     uv run --group build python build.py app
@@ -72,15 +72,43 @@ def dev() -> None:
     print(f"Installed. Try: phystrackx --version  (version {version()})")
 
 
-def test() -> int:
-    """Runs each tests/test_*.py as a script (each exits non-zero on a failed check)."""
+# Test files with checks on how long something takes: run alone, after the others, so a busy machine does not
+# fail them
+TIMED_TESTS = {"test_plots.py", "test_stop.py"}
+
+
+def test(jobs: int | None = None) -> int:
+    """Runs each tests/test_*.py as a script (each exits non-zero on a failed check). The files run several at
+    once (`jobs`; PHYSTRACK_TEST_JOBS, else half the CPUs), each in a test folder of its own; the timed ones
+    (TIMED_TESTS) run after them, one at a time. A file's output is printed whole when it ends, with its time."""
+    from concurrent.futures import ThreadPoolExecutor
+    import time
+
+    jobs = jobs or int(os.environ.get("PHYSTRACK_TEST_JOBS") or 0) or max(1, (os.cpu_count() or 2) // 2)
+    work = os.path.join(tempfile.gettempdir(), "phystrack_qt_tests")
+    scripts = sorted(glob.glob(os.path.join(QT, "tests", "test_*.py")))
     failed = []
-    for script in sorted(glob.glob(os.path.join(QT, "tests", "test_*.py"))):
+
+    def run(script: str) -> None:
         name = os.path.basename(script)
-        print(f"== {name}", flush=True)
-        if subprocess.run([sys.executable, script], cwd=os.path.join(QT, "tests")).returncode:
+        env = dict(os.environ, PHYSTRACK_QT_TEST_WORK=os.path.join(work, os.path.splitext(name)[0]))
+        t0 = time.time()
+        done = subprocess.run([sys.executable, script], cwd=os.path.join(QT, "tests"), env=env,
+                              stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True,
+                              encoding="utf-8", errors="replace")
+        print(f"== {name} ({time.time() - t0:.0f} s{', FAILED' if done.returncode else ''})\n{done.stdout}",
+              flush=True)
+        if done.returncode:
             failed.append(name)
-    print("all test files passed" if not failed else f"failed: {', '.join(failed)}")
+
+    t0 = time.time()
+    with ThreadPoolExecutor(jobs) as pool:
+        list(pool.map(run, [s for s in scripts if os.path.basename(s) not in TIMED_TESTS]))
+    for script in scripts:
+        if os.path.basename(script) in TIMED_TESTS:
+            run(script)
+    print(f"{len(scripts)} test files in {time.time() - t0:.0f} s, {jobs} at a time")
+    print("all test files passed" if not failed else f"failed: {', '.join(sorted(failed))}")
     return 1 if failed else 0
 
 

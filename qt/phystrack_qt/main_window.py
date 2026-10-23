@@ -9,7 +9,7 @@ direction) turn the tracked positions into physical values; Plots shows them, an
 writes them to CSV. Projects save the whole setup next to the video (see project_file.py).
 
 History and agents (docs/AGENT_PLAN.md): every change is an event in the History dock (click one
-to go back to it); there can be any number of windows, one trial each (windows.py); the agent tools
+to go back to it); there can be any number of trials, each a tab (windows.py, tab_window.py); the agent tools
 (agent/tools.py) drive these same methods, and Space stops an agent that is working.
 """
 
@@ -63,6 +63,8 @@ def _run_from_json(data):
     return None if not data else _run_key(data["method"], data["settings"], data["start"], data["end"])
 
 class MainWindow(QMainWindow):
+    host = None   # The TabWindow this trial is a tab of (None: a window of its own)
+
     def __init__(self, cache_dir: str) -> None:
         super().__init__()
         self.cache_dir = cache_dir
@@ -105,18 +107,20 @@ class MainWindow(QMainWindow):
         self._found: dict | None = None            # Its outline and box
         self._last_box = None                      # The box it was found in, found again when tuned
 
-        # Menu: projects and export, as in the Tk app
+        # Menu: grouped as a browser's File menu is (new and open; close and save; export)
         file_menu = self.menuBar().addMenu("File")
-        self._action(file_menu, "New Window", lambda: windows.new_window(), "Ctrl+N")
-        self._action(file_menu, "New Tab", lambda: windows.new_window(), "Ctrl+T")   # A blank window: a tab
-        self._action(file_menu, "Close Tab", self.close_tab, "Ctrl+W")
+        self._action(file_menu, "New Tab", lambda: windows.new_window(host=self.host), "Ctrl+T")
+        self._action(file_menu, "New Window", lambda: windows.new_window(separate=True), "Ctrl+N")
         self._action(file_menu, "Reopen Closed Tab", lambda: windows.reopen_closed(), "Ctrl+Shift+T")
         self._action(file_menu, "Open Video…", self.choose_video, "Ctrl+Shift+O")
         self._action(file_menu, "Open Project…", self.open_project, "Ctrl+O")
-        self._action(file_menu, "Save Project", self.save_project, "Ctrl+S")
-        self._action(file_menu, "Save Project As…", self.save_project_as, "Ctrl+Shift+S")
         self.recent_menu = file_menu.addMenu("Open Recent")
         self.recent_menu.aboutToShow.connect(self._fill_recent_menu)
+        file_menu.addSeparator()
+        self._action(file_menu, "Close Window", lambda: self.window().close(), "Ctrl+Shift+W")   # Every tab in it
+        self._action(file_menu, "Close Tab", self.close_tab, "Ctrl+W")
+        self._action(file_menu, "Save Project", self.save_project, "Ctrl+S")
+        self._action(file_menu, "Save Project As…", self.save_project_as, "Ctrl+Shift+S")
         file_menu.addSeparator()
         self._action(file_menu, "Export Data (CSV)…", self.export_data)
 
@@ -436,12 +440,21 @@ class MainWindow(QMainWindow):
             self._title()
         self.history.note(op, params)
 
-    def _title(self) -> None:
-        name = None
+    def _file_name(self) -> str | None:
+        """The project's file name, else the video's, else None."""
         if self.project_path:
-            name = os.path.basename(self.project_path)
-        elif self.source.path:
-            name = os.path.basename(self.source.path)
+            return os.path.basename(self.project_path)
+        if self.source.path:
+            return os.path.basename(self.source.path)
+        return None
+
+    def tab_name(self) -> str:
+        """The tab's text: the project or video, starred if it has unsaved changes."""
+        name = self._file_name()
+        return f"{name}{' *' if self._dirty else ''}" if name else "New Tab"
+
+    def _title(self) -> None:
+        name = self._file_name()
         star = " *" if self._dirty else ""
         self.setWindowTitle(f"PhysTrackX (Qt spike) [{self.wid}]" + (f" – {name}{star}" if name else ""))
 
@@ -1491,7 +1504,8 @@ class MainWindow(QMainWindow):
             self.agent_label.hide()
 
     def changeEvent(self, event) -> None:
-        if event.type() == event.Type.ActivationChange and self.isActiveWindow():
+        # A tab's window (its TabWindow) says which tab is active; every tab gets that window's activation
+        if event.type() == event.Type.ActivationChange and self.isWindow() and self.isActiveWindow():
             windows.activated(self.wid)
         super().changeEvent(event)
 
@@ -1647,13 +1661,28 @@ class MainWindow(QMainWindow):
                 windows.remember_closed(self._closed_entry())
             windows.remove(self.wid)
             session.forget(self.wid)
+            if self.host is not None:
+                self.host.remove(self)
         else:
             event.ignore()
 
     def close_tab(self) -> None:
-        """Cmd+W (Ctrl+W): closes this window, which is a tab, after the unsaved-changes check. The next window
-        opened comes to the front. The last window is not closed: it is replaced by a blank one, so the app
-        stays open."""
+        """Cmd+W (Ctrl+W), or the tab's close button: closes this trial after the unsaved-changes check (on its
+        tab, shown first). The tab to its right is shown next, else the one to its left. The last tab of the
+        last window is not closed: a blank tab takes its place, so the app stays open. The last tab of
+        another window closes that window."""
+        if self.host is not None:
+            if self._dirty:
+                windows.focus(self)
+            if not self._confirm_discard():
+                return
+            self._confirmed_close = True
+            host = self.host
+            if len(host.trials()) == 1 and windows.hosts() == [host]:
+                windows.new_window(host=host)
+            self.close()
+            return
+        # A window of its own (no tab bar): the window opened after it comes to the front
         if not self._confirm_discard():
             return
         self._confirmed_close = True
