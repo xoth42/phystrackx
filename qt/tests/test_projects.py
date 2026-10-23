@@ -48,13 +48,16 @@ def test_project_folders() -> None:
     h.check("a writable video folder is where the project goes",
             project_file.default_folder(video) == folder)
 
-    os.chmod(folder, 0o555)  # Read-only, as a folder on a shared drive can be
-    try:
-        where = project_file.default_folder(video)
-        h.check("a read-only video folder sends the project to the user's projects folder",
-                where == paths.projects_dir(), where)
-    finally:
-        os.chmod(folder, 0o755)
+    if os.name == "nt":   # chmod does not make a folder read-only on Windows: nothing to test there
+        print("  skipped: chmod cannot make a folder read-only on Windows")
+    else:
+        os.chmod(folder, 0o555)  # Read-only, as a folder on a shared drive can be
+        try:
+            where = project_file.default_folder(video)
+            h.check("a read-only video folder sends the project to the user's projects folder",
+                    where == paths.projects_dir(), where)
+        finally:
+            os.chmod(folder, 0o755)
 
     h.check("a new project is named after the video",
             os.path.basename(project_file.new_project_path(video)) == "clip" + project_file.EXTENSION,

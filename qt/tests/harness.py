@@ -14,6 +14,11 @@ import sys
 import tempfile
 import time
 
+# Windows consoles print in a code page that cannot show the app's text (such as ▸): print in UTF-8
+for stream in (sys.stdout, sys.stderr):
+    if hasattr(stream, "reconfigure"):
+        stream.reconfigure(encoding="utf-8", errors="backslashreplace")
+
 QT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path[:0] = [QT, os.path.dirname(QT)]  # The spike, then the parent repo (media, core)
 if not os.environ.get("PHYSTRACK_QT_SHOW"):

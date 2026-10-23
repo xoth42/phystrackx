@@ -84,6 +84,8 @@ jobs:
         run: uv run --no-project --with colorlog python build.py models
 
       - name: Tests (the release is not built if they fail)
+        env:
+          PYTHONUTF8: "1"
         run: uv run python build.py test
 
       - name: Build the app

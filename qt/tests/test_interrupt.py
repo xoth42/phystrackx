@@ -7,6 +7,7 @@ C++, where Python's own Ctrl-C handler never gets a turn, so run.py asks the loo
 
 import os
 import signal
+import sys
 import time
 
 import harness as h  # noqa: F401  (sets up Qt before PySide6 is imported)
@@ -58,6 +59,9 @@ def test_ctrl_c_during_setup_quits_when_the_loop_starts() -> None:
 
 
 if __name__ == "__main__":
+    if os.name == "nt":   # On Windows os.kill(pid, SIGINT) ends the process rather than sending Ctrl-C
+        print("skipped: os.kill cannot send Ctrl-C on Windows")
+        sys.exit(0)
     h.app()
     for test in (test_ctrl_c_stops_the_app_with_a_plot_open,
                  test_ctrl_c_during_setup_quits_when_the_loop_starts):

@@ -77,7 +77,8 @@ def test_object_manager() -> None:
         return bool(((pixels.max(axis=1) - pixels.min(axis=1)) > 60).any())
 
     corner = image[int(r.top()) + 2:int(r.top()) + 5, int(r.left()) + 2:int(r.left()) + 5]
-    h.check("the circle's corner is not outlined (only the ellipse is)", not coloured(corner))
+    h.check("the circle's corner is not outlined (only the ellipse is)", not coloured(corner),
+            f"largest colour spread in the corner {int(np.ptp(np.asarray(corner, dtype=int), axis=-1).max())}")
     edge = image[cy - 2:cy + 3, int(r.right()) - 3:int(r.right()) + 1]
     h.check("the circle's edge is outlined", coloured(edge))
     w._dirty = False  # Closing would ask about unsaved changes, and a test has nobody to answer

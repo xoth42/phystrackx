@@ -74,4 +74,6 @@ jobs:
           test $? -eq 2
 
       - name: Tests
+        env:
+          PYTHONUTF8: "1"   # Windows prints the app's text (▸ and the like) in UTF-8
         run: uv run python build.py test
