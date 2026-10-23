@@ -76,7 +76,9 @@ def test_object_manager() -> None:
         pixels = np.asarray(pixels, dtype=int).reshape(-1, 3)
         return bool(((pixels.max(axis=1) - pixels.min(axis=1)) > 60).any())
 
-    corner = image[int(r.top()) + 2:int(r.top()) + 5, int(r.left()) + 2:int(r.left()) + 5]
+    # The top-right corner: the object's number is drawn in the top-left one, and a circle's ellipse
+    # does not reach either corner
+    corner = image[int(r.top()) + 2:int(r.top()) + 5, int(r.right()) - 5:int(r.right()) - 2]
     h.check("the circle's corner is not outlined (only the ellipse is)", not coloured(corner),
             f"largest colour spread in the corner {int(np.ptp(np.asarray(corner, dtype=int), axis=-1).max())}")
     edge = image[cy - 2:cy + 3, int(r.right()) - 3:int(r.right()) + 1]

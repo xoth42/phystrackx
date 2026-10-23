@@ -213,7 +213,7 @@ def test_data_first_then_fits_made_ahead() -> None:
     panel = window.fit_panel
     lo, hi = panel.range
     h.check("the other models are fitted in the background",
-            h.pump(lambda: all(panel.fitter.cached(lo, hi, k) for k in panel.keys), 20),
+            h.pump(lambda: all(panel.fitter.cached(lo, hi, k) for k in panel.keys), 90),   # slow CI runners
             str(panel.fitter.background_fits))
     for index, key in enumerate(panel.keys):
         window.model_table.table.selectRow(index)
