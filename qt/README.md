@@ -1,44 +1,53 @@
-# PhysTrackX Qt spike
+# PhysTrackX (Qt app)
 
-**Experimental. Not the app.** This folder is a throwaway spike to find out how a Qt
-(PySide6, `QGraphicsView` with an OpenGL viewport) version of PhysTrackX feels. The real app is the
-Tk one in the parent folder; nothing here changes it.
+The Qt app: measure motion in a video, track objects and fit the physics. It is the app to use; the
+Tk app in the parent's `tk/` folder is deprecated and nothing here depends on it. It is built on the
+parent's `core`, `media` and `experiments` packages, which it reads and never changes.
 
-Notes for anyone (person or agent) working in the parent repo:
-
-- `qt/` is its **own git repository** and is listed in the parent's `.git/info/exclude`, so the
-  parent repo does not see it. Do not `git add` it from the parent.
-- It has its **own virtual environment, outside iCloud**: `~/.venvs/phystrackx-qt` (see Setup).
-  The parent's `.venv` is untouched. Do not put a Qt venv in this iCloud folder: iCloud sets the
-  macOS "hidden" flag on files in dot-folders, Qt skips hidden plugin files, and the app then
-  fails with "no Qt platform plugin could be initialized".
-- It **imports the parent's `media` and `core` packages read-only** (video reading and proxy
-  encoding). It never writes into the parent: proxies go to `qt/cache/`.
-
-## Setup
-
-```sh
-uv venv --python 3.12 ~/.venvs/phystrackx-qt
-uv pip install --python ~/.venvs/phystrackx-qt/bin/python -r requirements.txt
-```
-
-`opencv-python-headless` is pinned to the parent's OpenCV version: the 5.0 macOS wheel has no
-FFmpeg backend, so `media.VideoReader` (which asks for FFmpeg) cannot open videos with it. The
-parent's `opencv-python` (not headless) bundles its own Qt and clashes with PySide6.
-
-## Run
+## Install and run
 
 ```sh
 cd qt
-~/.venvs/phystrackx-qt/bin/python run.py [optional/video.mp4]
+uv run python build.py dev                # installs `phystrackx` on PATH, running this code
+phystrackx "path/to/Air Trial 1.mp4"      # a video, or a .phystrack project
+phystrackx --version
 ```
+
+`build.py dev` needs [uv](https://docs.astral.sh/uv/) and nothing else: uv makes the Python 3.12 and
+the dependencies, in its own folder, so no venv is set up by hand. Rerun it after changing
+`pyproject.toml`. For a packaged app (macOS `.dmg`, Windows `.zip`, Linux AppImage), see
+`packaging/README.md`.
+
+Without installing, from this folder: `uv run python run.py [video or project]`. Tests:
+`uv run python build.py test`.
+
+## Notes for anyone working on it
+
+- `qt/` lives in the parent repo's git. Its build output (`qt/build/`) and environment (`.venv`) are
+  ignored. Keep the environment **outside iCloud**: `export UV_PROJECT_ENVIRONMENT=~/.venvs/phystrackx-dev`
+  (iCloud sets the macOS "hidden" flag on files in dot-folders, Qt skips hidden plugin files, and the
+  app then fails with "no Qt platform plugin could be initialized").
+- It **imports the parent's `media`, `core` and `experiments` packages read-only**: from the repo root
+  in a checkout, from site-packages when installed (`phystrack_qt/__init__.py`).
+- It never writes into the install or the repo. Proxies, the agent bridge's port and projects of a
+  read-only folder go to the user's cache and data folders (`phystrack_qt/paths.py`; the tests use
+  `PHYSTRACK_QT_HOME`).
+- Older projects: a Tk-app `.phystrack` is imported (the setup carried over; the rest named, not
+  kept); a newer or other-format file is refused. See `packaging/README.md`.
+
+## Setup notes
+
+`opencv-python-headless` is pinned to the parent's OpenCV version: the 5.0 macOS wheel has no
+FFmpeg backend, so `media.VideoReader` (which asks for FFmpeg) cannot open videos with it. The
+parent's `opencv-python` (not headless) bundles its own Qt and clashes with PySide6. ffmpeg itself
+comes with `imageio-ffmpeg`, so no system install is needed.
 
 ## What is in it
 
 A window with a left sidebar of buttons, the video view, and a seek bar.
 
 - **Import Video**: the first frame shows at once (about 0.3 s), read from the source. The proxy
-  is made in the background by the parent's `media.proxyvideo` (cached in `qt/cache/`), and
+  is made in the background by the parent's `media.proxyvideo` (cached in the user's cache folder), and
   reading switches to it when it is ready (about 10 s for a 39 s phone clip).
 - **Trim**: choose start and end frames; the seek bar is limited to that range. Only a range, not
   a re-encoded clip as in the Tk app.
@@ -92,7 +101,8 @@ without any coordinate code (in the Tk app, `ViewTransform` does this by hand).
 ## Tests
 
 ```sh
-~/.venvs/phystrackx-qt/bin/python tests/test_tracking.py     # PHYSTRACK_QT_SHOW=1 to watch
+uv run python build.py test                                  # all of them
+uv run python tests/test_tracking.py                         # one; PHYSTRACK_QT_SHOW=1 to watch
 ```
 
 `tests/harness.py` runs Qt with no window (the `offscreen` platform) and a CPU viewport, and

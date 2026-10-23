@@ -22,9 +22,10 @@ import urllib.request
 HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, os.path.dirname(os.path.dirname(HERE)))   # qt/, for phystrack_qt.agent.specs
 
+from phystrack_qt import paths  # noqa: E402
 from phystrack_qt.agent.specs import INSTRUCTIONS, SPECS, json_schema  # noqa: E402
 
-PORT_FILE = os.path.join(os.path.dirname(os.path.dirname(HERE)), "cache", "bridge.port")
+PORT_FILE = os.path.join(paths.cache_dir(), "bridge.port")
 PROTOCOL = "2025-06-18"
 
 

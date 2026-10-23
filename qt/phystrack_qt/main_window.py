@@ -483,11 +483,21 @@ class MainWindow(QMainWindow):
             self._apply_state(state)
         finally:
             self.history.paused = False
-        self.project_path = path
-        self._dirty = False
+        imported = state.get("imported")
+        # An imported file is never saved over: Save writes a new project next to the video
+        self.project_path = None if imported is not None else path
+        self._dirty = imported is not None
         recent.remember(path)
         self._title()
-        self.statusBar().showMessage(f"Opened {os.path.basename(path)}")
+        if imported is not None:
+            parts = [f"Imported the Tk project {os.path.basename(path)}: the objects start at their "
+                     "marked boxes, to track again."]
+            if imported["left_out"]:
+                parts.append(f"Not carried over: {'; '.join(imported['left_out'])}.")
+            parts += [f"Check: {note}." for note in imported["check"]]
+            self.statusBar().showMessage(" ".join(parts), 20000)
+        else:
+            self.statusBar().showMessage(f"Opened {os.path.basename(path)}")
         self.history.reset()
         self.history.log("open", f"Opened project {os.path.basename(path)}",
                          {"project": os.path.basename(path)})
@@ -616,14 +626,37 @@ class MainWindow(QMainWindow):
             window.close()
         return len(stale)
 
+    def _fit_state(self, state: dict) -> dict:
+        """The state with its positions scaled to the picture as it is now. The picture is the proxy
+        once that is ready, so its size can differ from the one the project was saved at (or from a
+        video imported from the Tk app, which is at the frame's size). Returns state itself if equal."""
+        saved = state.get("picture")
+        now = self.view.picture.pixmap().size()
+        if not saved or not saved[0] or not saved[1] or list(saved) == [now.width(), now.height()]:
+            return state
+        kx, ky = now.width() / saved[0], now.height() / saved[1]
+        state = copy.deepcopy(state)
+        if state.get("axes"):
+            state["axes"]["x"] *= kx
+            state["axes"]["y"] *= ky
+            state["axes"]["length"] *= (kx + ky) / 2
+        if state.get("ruler"):
+            state["ruler"]["p1"] = [state["ruler"]["p1"][0] * kx, state["ruler"]["p1"][1] * ky]
+            state["ruler"]["p2"] = [state["ruler"]["p2"][0] * kx, state["ruler"]["p2"][1] * ky]
+        for entry in state.get("objects", []):
+            x, y, w, h = entry["marked"]
+            entry["marked"] = [x * kx, y * ky, w * kx, h * ky]
+            entry["boxes"] = {f: (None if b is None else [b[0] * kx, b[1] * ky, b[2] * kx, b[3] * ky])
+                              for f, b in (entry.get("boxes") or {}).items()}
+        state["picture"] = [now.width(), now.height()]
+        return state
+
     def _apply_state(self, state: dict) -> None:
         """Puts a project's setup back on the video that was just loaded (or, for a revert, on the
         video cleared of its setup)."""
+        state = self._fit_state(state)
         self.plots = copy.deepcopy(state.get("plots") or {})
         self._apply_plot_settings()
-        if list(state.get("picture", [])) != list(self.view.picture.pixmap().size().toTuple()):
-            self.statusBar().showMessage("The video's size has changed since the project was saved; "
-                                         "positions may be off", 10000)
         trim = state.get("trim")
         if trim:
             self.trim = (int(trim[0]), int(trim[1]))

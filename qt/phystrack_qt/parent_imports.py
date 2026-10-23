@@ -1,5 +1,5 @@
 """
-Imports modules from the repo root (core, media, experiments) without running their package __init__ files.
+Imports modules from the repo's packages (core, media, experiments) without running their package __init__ files.
 
 The parent's experiments/__init__.py imports Rigid, which imports customtkinter, the Tk-bound GUI
 plugins (Crop, Filters) and OCR. The tracker itself (experiments/rigid/mltracker.py) needs only
@@ -13,7 +13,7 @@ import os
 import sys
 import types
 
-PARENT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+from phystrack_qt import PARENT   # The folder holding those packages (the repo root, or site-packages)
 
 
 def import_light(module: str):

@@ -1,5 +1,0 @@
-# Qt spike environment (see README.md). Versions of OpenCV and numpy match the parent app.
-PySide6-Essentials
-opencv-python-headless==4.11.0.86
-numpy==1.26.4
-colorlog  # Imported by the parent's core package

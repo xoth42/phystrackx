@@ -10,7 +10,7 @@ import os
 
 import harness as h  # noqa: F401  (sets up Qt before PySide6 is imported)
 
-from phystrack_qt import project_file, recent  # noqa: E402
+from phystrack_qt import paths, project_file, recent  # noqa: E402
 from phystrack_qt.plot_window import DEFAULT_KINDS, write_plot_csv, write_results  # noqa: E402
 from test_tracking import make_clip  # noqa: E402
 
@@ -51,8 +51,8 @@ def test_project_folders() -> None:
     os.chmod(folder, 0o555)  # Read-only, as a folder on a shared drive can be
     try:
         where = project_file.default_folder(video)
-        h.check("a read-only video folder sends the project to projects/",
-                where == project_file.PROJECTS_DIR, where)
+        h.check("a read-only video folder sends the project to the user's projects folder",
+                where == paths.projects_dir(), where)
     finally:
         os.chmod(folder, 0o755)
 

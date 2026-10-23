@@ -1,0 +1,76 @@
+# Qt app: installs the `phystrackx` command and runs the tests, on Windows, macOS and Linux.
+# Runs on every change to the app or the parent code it uses. Local equivalent:
+#   cd qt && uv run python build.py models && uv run python build.py test
+name: Qt app CI
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "qt/**"
+      - "core/**"
+      - "media/**"
+      - "experiments/**"
+      - "filters/**"
+      - ".github/workflows/qt-*.yml"
+  pull_request:
+    paths:
+      - "qt/**"
+      - "core/**"
+      - "media/**"
+      - "experiments/**"
+      - "filters/**"
+      - ".github/workflows/qt-*.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    name: Test (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+    defaults:
+      run:
+        shell: bash
+        working-directory: qt
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: astral-sh/setup-uv@v6
+        with:
+          enable-cache: true
+          cache-dependency-glob: qt/uv.lock
+
+      - name: Qt's system libraries (Linux)
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libegl1 libgl1 libxkbcommon0 libxkbcommon-x11-0 libdbus-1-3 \
+            libfontconfig1 libxcb-cursor0 libxcb-icccm4 libxcb-keysyms1 libxcb-shape0
+
+      - name: Python
+        run: uv python install 3.12
+
+      - name: The models the app ships with
+        run: uv run python build.py models
+
+      - name: Install the command, as a user would
+        run: |
+          uv tool install --python 3.12 --force .
+          echo "$(uv tool dir --bin)" >> "$GITHUB_PATH"
+
+      - name: The command starts (no Qt needed for --help and --version)
+        run: |
+          "$(uv tool dir --bin)/phystrackx" --version
+          "$(uv tool dir --bin)/phystrackx" --help
+          set +e
+          "$(uv tool dir --bin)/phystrackx" no-such-file.mp4
+          test $? -eq 2
+
+      - name: Tests
+        run: uv run python build.py test

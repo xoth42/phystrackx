@@ -40,7 +40,8 @@ Auto Ruler is in item 2 because it is the ruler's own snap: the logic is the par
 - [x] Saved next to the video; `qt/projects/` when that folder is read-only (as the Tk app does).
   New projects never overwrite a file (the second is "clip 2.phystrack").
 - [x] `run.py <file.phystrack>` opens the project.
-- [ ] Share format with the Tk app (decision for the migration: see the bottom).
+- [x] Tk-app projects import one way into this format (the setup carried over; what cannot carry
+  over is named). This format is never downgraded for Tk, and Tk's is never written. See the bottom.
 
 ## Panning
 - [x] Drag the picture to pan when no tool is active (`ScrollHandDrag`).
@@ -176,9 +177,11 @@ Auto Ruler is in item 2 because it is the ruler's own snap: the logic is the par
   the Tk app's Auto Ruler gets the same change. Its tests (`tests/test_autoruler.py`) still pass.
 
 ## Decisions to make in the migration
-- **Project files.** Qt projects are format 2 and the Tk app refuses them. Sharing one format with
-  the Tk app would mean deciding the coordinate convention for the ruler and axes (the Tk app stores
-  them in canvas coordinates relative to the picture), and fixing the rotation issue above first.
+- **Project files. Decided:** Tk-app files (format 1) import one way, in `phystrack_qt/tk_import.py`:
+  canvas positions are scaled to the frame, and what has no Qt counterpart (crop, data and fits, OCR)
+  is dropped and named. This format is never downgraded to fit the Tk app, and nothing writes the Tk
+  format. Not yet checked: the frame each Tk object box was marked on (taken as the trim start; the
+  status bar says so), and whether the imported boxes sit on the object.
 - **Parent package imports.** `experiments/__init__.py` and `gui/components/__init__.py` import Tk
   code, so the Qt build imports the parent's modules through `phystrack_qt/parent_imports.py`.
   Making those `__init__` files lazy is the clean fix, once the tracker work in the parent settles.

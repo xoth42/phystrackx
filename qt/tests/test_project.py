@@ -67,15 +67,16 @@ def test_project_round_trip() -> None:
 
 
 def test_other_formats_refused() -> None:
+    """Tk-app projects are imported (test_migration.py); other formats and newer versions are refused."""
     folder = h.WORK
-    tk_style = os.path.join(folder, "tk_style.phystrack")
-    with open(tk_style, "w", encoding="utf-8") as f:
-        json.dump({"version": 1, "video": make_clip(), "trim": None}, f)
+    other = os.path.join(folder, "other.phystrack")
+    with open(other, "w", encoding="utf-8") as f:
+        json.dump({"format": "someone-else", "version": 2, "video": make_clip()}, f)
     try:
-        project_file.load(tk_style)
-        h.check("a Tk-app project is refused", False)
+        project_file.load(other)
+        h.check("another app's project is refused", False)
     except ValueError as e:
-        h.check("a Tk-app project is refused with a message", "Tk app" in str(e) or "not a project" in str(e), str(e))
+        h.check("another app's project is refused with a message", "not a project" in str(e), str(e))
 
     future = os.path.join(folder, "future.phystrack")
     with open(future, "w", encoding="utf-8") as f:

@@ -15,6 +15,8 @@ import time
 
 from PySide6.QtCore import QObject, Signal
 
+from phystrack_qt import paths
+
 _windows: dict = {}          # id -> MainWindow, in the order they were opened
 _ids = itertools.count(1)
 active: str | None = None    # The window the user last brought to the front
@@ -54,8 +56,7 @@ def new_window(path: str | None = None, show: bool = True):
     """A new, empty window (with the same proxy cache as the others), opening `path` if given (a
     video or a project)."""
     from .main_window import MainWindow
-    cache = next(iter(_windows.values())).cache_dir if _windows else \
-        os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "cache")
+    cache = next(iter(_windows.values())).cache_dir if _windows else paths.cache_dir()
     window = MainWindow(cache)
     window.resize(1440, 900)
     if show:

@@ -14,7 +14,7 @@ import harness as h  # noqa: F401  (sets up Qt before PySide6 is imported)
 import numpy as np  # noqa: E402
 from PySide6.QtCore import QTimer  # noqa: E402
 
-import run  # noqa: E402  (the Ctrl-C wiring lives in run.py)
+from phystrack_qt import app as run  # noqa: E402  (the Ctrl-C wiring lives in phystrack_qt/app.py)
 from phystrack_qt.plot_window import open_plots  # noqa: E402
 
 

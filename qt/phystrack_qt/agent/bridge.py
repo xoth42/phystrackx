@@ -27,14 +27,13 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 from PySide6.QtCore import QCoreApplication, QObject, Qt, QThread, Signal
 
-from .. import windows
+from .. import paths, windows
 from . import tools
 from .specs import ALLOWED_WHEN_STOPPED, SPECS
 
 log = logging.getLogger(__name__)
 DEFAULT_PORT = 8765
-PORT_FILE = os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))),
-                         "cache", "bridge.port")
+PORT_FILE = os.path.join(paths.cache_dir(), "bridge.port")   # Read by mcp_server.py
 GUI_TIMEOUT = 180.0     # s: one step on the Qt thread (a modal dialog would hold it up)
 STOPPED = ("The user pressed Space to stop you. Do nothing more until they tell you to go on; "
            "then call resume (it lists what they changed).")
