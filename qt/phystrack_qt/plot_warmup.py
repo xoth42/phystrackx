@@ -21,7 +21,9 @@ def start() -> None:
     if _started:
         return
     _started = True
-    threading.Thread(target=_warm, name="plot warm-up", daemon=True).start()
+    # Not a daemon: a daemon still importing when the app exits can abort the process as the interpreter
+    # shuts down (seen on Linux). Quitting within a few seconds of starting then waits for the imports.
+    threading.Thread(target=_warm, name="plot warm-up", daemon=False).start()
 
 
 def _warm() -> None:

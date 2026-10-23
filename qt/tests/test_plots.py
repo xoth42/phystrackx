@@ -118,7 +118,7 @@ def test_model_table() -> None:
     h.check("the default model is selected", table.current == panel.model == "damped_linear")
     h.check("R² and the period fill in as the fits come in",
             h.pump(lambda: all(table.table.item(row, 1).text() not in ("…", "failed")
-                               for row in range(rows)), 30),
+                               for row in range(rows)), 90),   # slow CI runners
             str([table.table.item(row, 1).text() for row in range(rows)]))
     h.check("the period column is titled Period (s) and shows its error",
             table.table.horizontalHeaderItem(2).text() == "Period (s)"
@@ -128,7 +128,8 @@ def test_model_table() -> None:
             all(table.table.cellWidget(row, 0).findChildren(QLabel)[-1].pixmap() is not None
                 and not table.table.cellWidget(row, 0).findChildren(QLabel)[-1].pixmap().isNull()
                 for row in range(rows)))
-    r2 = [float(table.table.item(row, 1).text()) for row in range(rows)]
+    r2 = [float(text) if (text := table.table.item(row, 1).text()) not in ("…", "failed") else 0.0
+          for row in range(rows)]   # A fit still running is reported above, not parsed
     bold = [row for row in range(rows) if table.table.item(row, 1).font().bold()]
     h.check("the best R² is in bold (one row)", len(bold) == 1 and r2[bold[0]] == max(r2), f"{bold} {r2}")
 

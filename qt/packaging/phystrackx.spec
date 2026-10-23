@@ -82,6 +82,9 @@ if MACOS:
             "CFBundleShortVersionString": VERSION,
             "CFBundleVersion": VERSION,
             "NSHighResolutionCapable": True,
+            # The console above makes PyInstaller set LSBackgroundOnly; macOS then never makes the app
+            # frontmost, so its keys go to the app behind it. A window app must be a normal app.
+            "LSBackgroundOnly": False,
             "LSMinimumSystemVersion": "11.0",
         },
     )
