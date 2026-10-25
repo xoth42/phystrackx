@@ -110,12 +110,24 @@ class VideoSource(QObject):
     def _make_proxy(self, path: str, out: str, width: int, total: int, job: int) -> None:
         # Made under a name of its own, then moved into place: two tabs opening the same video at once each make
         # one, and with one name (and one temporary file) the second's rename failed
+        # If the other finished first, its proxy is used and this one deleted: the same video and settings make
+        # the same proxy, and on Windows a file that is open (the other tab reads it) cannot be replaced
         own = f"{os.path.splitext(out)[0]}.{os.getpid()}-{id(self)}-{job}.mp4"
         try:
             made = proxyvideo(path, width=width, writepath=own, on_progress=self.progress.emit,
                               total_frames=total)
             if made is not None:
-                os.replace(made, out)
+                if not os.path.isfile(out):
+                    try:
+                        os.replace(made, out)
+                    except PermissionError:   # Windows: the other's proxy was put in place, and opened, just now
+                        if not os.path.isfile(out):
+                            raise
+                if os.path.isfile(made):   # Not moved: the other's is in place
+                    try:
+                        os.remove(made)
+                    except OSError:
+                        pass   # A stray file in the cache costs only space
                 made = out
         except Exception as e:  # Reported to the user rather than lost on the worker thread
             made = None

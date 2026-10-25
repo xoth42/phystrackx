@@ -44,15 +44,19 @@ def make_clip() -> str:
     return path
 
 
-def drag(view, a, b) -> None:
-    """A real mouse drag on the view from frame point a to b."""
+def drag(view, a, b) -> tuple:
+    """A real mouse drag on the view from frame point a to b. Returns the frame points the mouse really
+    pressed and let go at: it moves in whole view pixels, so it lands up to half a view pixel off (in a small
+    view, over a frame pixel), and a check of where something ended up should go by these."""
     to_view = lambda p: view.mapFromScene(view.picture.mapToScene(*p))  # noqa: E731
+    landed = lambda p: view.picture.mapFromScene(view.mapToScene(to_view(p))).toTuple()  # noqa: E731
     vp = view.viewport()
     QTest.mousePress(vp, Qt.MouseButton.LeftButton, Qt.KeyboardModifier.NoModifier, to_view(a))
     for k in range(1, 6):  # A few moves on the way, as a hand makes
         p = (a[0] + (b[0] - a[0]) * k / 5, a[1] + (b[1] - a[1]) * k / 5)
         QTest.mouseMove(vp, to_view(p))
     QTest.mouseRelease(vp, Qt.MouseButton.LeftButton, Qt.KeyboardModifier.NoModifier, to_view(b))
+    return landed(a), landed(b)
 
 
 def test_track_thrown_ball() -> None:

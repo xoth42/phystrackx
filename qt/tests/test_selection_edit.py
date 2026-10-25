@@ -9,6 +9,8 @@ Fine-tuning a selection and re-running Track:
     ~/.venvs/phystrackx-qt/bin/python tests/test_selection_edit.py
 """
 
+import math
+
 import harness as h  # noqa: F401  (sets up Qt before PySide6 is imported)
 
 from PySide6.QtCore import QRectF, Qt  # noqa: E402
@@ -62,11 +64,12 @@ def test_move_and_size() -> None:
 
     # The knob: dragged out from the centre, the box grows about its centre
     cx, cy = obj.marked[0] + 20, obj.marked[1] + 20
-    drag(w.view, (cx + 20, cy), (cx + 30, cy))   # (the view's pixels are a little over a frame pixel)
+    _, (bx, by) = drag(w.view, (cx + 20, cy), (cx + 30, cy))
     x, y, bw, bh = obj.marked
+    reach = 2 * math.hypot(bx - cx, by - cy)   # The knob goes where the mouse let go (in whole view pixels)
     h.check("dragging the knob out grows the box about its centre",
-            abs(bw - 60) < 1.5 and bw == bh and abs(x + bw / 2 - cx) < 1e-6 and abs(y + bh / 2 - cy) < 1e-6,
-            str(obj.marked))
+            abs(bw - reach) < 0.5 and abs(bw - 60) < 4 and bw == bh
+            and abs(x + bw / 2 - cx) < 1e-6 and abs(y + bh / 2 - cy) < 1e-6, f"{obj.marked}; to {reach:.2f}")
     before = obj.marked[2]
     QTest.keyClick(w, Qt.Key.Key_BracketLeft)
     QTest.keyClick(w, Qt.Key.Key_BracketLeft)
@@ -74,7 +77,7 @@ def test_move_and_size() -> None:
             f"{before} -> {obj.marked[2]}")
     QTest.keyClick(w, Qt.Key.Key_BracketRight)
     h.check("] grows it, about the same centre", abs(before - 2 - obj.marked[2]) < 1e-6
-            and abs(obj.marked[0] + obj.marked[2] / 2 - 150) < 0.5, str(obj.marked))
+            and abs(obj.marked[0] + obj.marked[2] / 2 - cx) < 1e-6, str(obj.marked))
     w.object_list.clearSelection()
     h.check("without a selection, Move is off and there is no knob",
             not w.move_obj_btn.isEnabled() and not obj.handle.isVisible())

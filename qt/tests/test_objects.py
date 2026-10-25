@@ -106,11 +106,11 @@ def test_drag_selected_object() -> None:
     h.check("the selected object is the one that can be dragged",
             first.rect.flags() & first.rect.GraphicsItemFlag.ItemIsMovable and not
             second.rect.flags() & second.rect.GraphicsItemFlag.ItemIsMovable)
-    drag(w.view, (120, 120), (160, 140))
+    (ax, ay), (bx, by) = drag(w.view, (120, 120), (160, 140))
     x, y, bw, bh = first.marked
-    h.check("dragging the selected object moves its box (before tracking)",
-            abs(x - 140) < 1.5 and abs(y - 120) < 1.5 and bw == 40 and bh == 40,
-            f"{first.marked}")
+    h.check("dragging the selected object moves its box (before tracking)",   # By where the mouse landed
+            abs(x - (100 + bx - ax)) < 0.5 and abs(y - (100 + by - ay)) < 0.5 and bw == 40 and bh == 40,
+            f"{first.marked}; mouse {ax:.1f},{ay:.1f} -> {bx:.1f},{by:.1f}")
     h.check("and the other object stays put", second.marked == (300, 200, 40, 40), str(second.marked))
     h.check("moving it marks the project as changed", w._dirty)
 
