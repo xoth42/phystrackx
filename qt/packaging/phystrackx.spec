@@ -54,8 +54,9 @@ exe = EXE(
     debug=False,
     strip=False,
     upx=False,                 # UPX breaks macOS signing and slows startup
-    # A console is kept so the command line works (phystrackx video.mp4 in a terminal)
-    console=True,
+    # macOS keeps a console so the command line works (phystrackx video.mp4 in a terminal). Windows has none:
+    # the program is its window, and its output goes to a log file (entry.py)
+    console=not WINDOWS,
     icon=ICON,
     codesign_identity=os.environ.get("PHYSTRACK_CODESIGN_IDENTITY") or None,
     entitlements_file=os.path.join(SPEC_DIR, "entitlements.plist") if MACOS else None,
