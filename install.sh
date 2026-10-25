@@ -57,21 +57,49 @@ if [ "$(uname -s)" = "Linux" ]; then
     fi
 fi
 
-echo "== The models the app ships with"
-uv run --no-project --with colorlog python build.py models
-
-echo "== Installing the phystrackx command, with the versions in uv.lock (the ones CI tests)"
+# Each step's output goes to this log
 mkdir -p build
-uv export --frozen --no-hashes --no-emit-project > build/constraints.txt
-uv tool install --python 3.12 --force --constraints build/constraints.txt .
+LOG=build/install.log
+: > "$LOG"
+TOTAL=$((2 + APP))   # the models, the command, and on macOS the app
+DONE=0
+
+# In a terminal, each step's whole output scrolls by, colored, above a progress bar with the percentage of
+# the install: packaging/install_progress.py, with the enlighten bar and colorlog colors that uv fetches here.
+# Without a terminal (a pipe, CI), or if they cannot be fetched, one line per step.
+UI="uv run --quiet --no-project --with enlighten==1.14.1 --with colorlog==6.12.0 python"
+FANCY=0
+if [ -t 1 ] && [ "${TERM:-dumb}" != "dumb" ] && $UI -c 'import enlighten, colorlog' >/dev/null 2>&1; then
+    FANCY=1
+fi
+
+# Runs one step; on failure, shows why and stops the install
+step() {
+    label=$1
+    shift
+    DONE=$((DONE + 1))
+    if [ "$FANCY" = 1 ]; then
+        $UI packaging/install_progress.py \
+            --log "$LOG" --stats build/install-progress.json --step "$DONE" --steps "$TOTAL" --label "$label" \
+            -- "$@" || { rc=$?; echo "The whole output is in $PWD/$LOG" >&2; exit "$rc"; }
+        return 0
+    fi
+    echo "== $label ($DONE/$TOTAL)"
+    "$@" >>"$LOG" 2>&1 || { tail -n 20 "$LOG" >&2; echo "failed: $label. The whole output is in $PWD/$LOG" >&2; exit 1; }
+}
+
+step "The models the app ships with" uv run --no-project --with colorlog python build.py models
+
+step "Installing the phystrackx command, with the versions in uv.lock (the ones CI tests)" sh -c \
+    'uv export --frozen --no-hashes --no-emit-project > build/constraints.txt &&
+     uv tool install --python 3.12 --force --constraints build/constraints.txt .'
 
 if [ "$APP" = 1 ]; then
-    echo "== Building and installing PhysTrackX.app in /Applications"
-    uv run --group build python build.py install
+    step "Building and installing PhysTrackX.app in /Applications" uv run --group build python build.py install
 fi
 
 BIN=$(uv tool dir --bin)
-echo "== Done"
+if [ "$FANCY" = 1 ]; then printf '\033[1;32mDone.\033[0m '; else echo "== Done"; fi
 "$BIN/phystrackx" --version
 case ":$PATH:" in
     *":$BIN:"*) ;;
