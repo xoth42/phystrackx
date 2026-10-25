@@ -33,6 +33,40 @@ class Cancelled(Exception):
     """The user stopped the reply being written."""
 
 
+class _ThinkTags:
+    """Splits text that carries its reasoning inline, between <think> and </think> (some models on
+    some runners), into (reasoning, reply) pieces as it streams. A tag cut between two pieces is
+    held back until the next piece shows what it is."""
+
+    TAGS = ("<think>", "</think>")
+
+    def __init__(self) -> None:
+        self.inside, self.held = False, ""
+
+    def feed(self, piece: str) -> list:
+        text, out = self.held + piece, []
+        self.held = ""
+        while text:
+            tag = self.TAGS[1] if self.inside else self.TAGS[0]
+            at = text.find(tag)
+            if at >= 0:
+                if at:
+                    out.append((self.inside, text[:at]))
+                text, self.inside = text[at + len(tag):], not self.inside
+                continue
+            # The end may be the start of a tag: hold it back
+            keep = next((n for n in range(min(len(tag) - 1, len(text)), 0, -1) if tag.startswith(text[-n:])), 0)
+            if len(text) > keep:
+                out.append((self.inside, text[:len(text) - keep]))
+            self.held = text[len(text) - keep:]
+            break
+        return out
+
+    def flush(self) -> list:
+        held, self.held = self.held, ""
+        return [(self.inside, held)] if held else []
+
+
 class LLM:
     def __init__(self, url: str | None = None, model: str | None = None, key: str | None = None) -> None:
         self.url = (url or os.environ.get("PHYSTRACK_LLM_URL") or DEFAULT_URL).rstrip("/")
@@ -55,10 +89,13 @@ class LLM:
             return sorted(m["id"] for m in json.loads(response.read()).get("data", []))
 
     def chat(self, messages: list, tools: list, on_text=None, cancelled=None,
-             max_tokens: int = 400) -> dict:
+             max_tokens: int = 400, on_reasoning=None) -> dict:
         """
-        One reply: {"content": text, "tool_calls": [{"id", "name", "arguments": dict, "bad": text}]}.
-        `on_text(piece)` gets the text as it is written; `cancelled()` is asked between pieces
+        One reply: {"content": text, "reasoning": text,
+                    "tool_calls": [{"id", "name", "arguments": dict, "bad": text}]}.
+        `on_text(piece)` gets the text as it is written, and `on_reasoning(piece)` a thinking
+        model's reasoning: from the reasoning field (Ollama, OpenRouter), reasoning_content
+        (llama.cpp, vLLM) or <think> tags in the text. `cancelled()` is asked between pieces
         (True: the reply stops, and Cancelled is raised). "bad" is set when a call's arguments
         are not JSON (they are then {}), so the caller can say so to the model.
         """
@@ -71,7 +108,14 @@ class LLM:
                            f"{e.read()[:300].decode('utf-8', 'replace')}") from None
         except OSError as e:
             raise LLMError(f"cannot reach the model runner at {self.url} ({e})") from None
-        content, calls = [], {}
+        content, reasoning, calls, tags = [], [], {}, _ThinkTags()
+
+        def take(pieces: list) -> None:
+            for is_reasoning, text in pieces:
+                (reasoning if is_reasoning else content).append(text)
+                callback = on_reasoning if is_reasoning else on_text
+                if callback is not None:
+                    callback(text)
         with response:
             for raw in response:
                 if cancelled is not None and cancelled():
@@ -88,10 +132,11 @@ class LLM:
                     continue
                 for choice in chunk.get("choices") or []:
                     delta = choice.get("delta") or {}
+                    thought = delta.get("reasoning") or delta.get("reasoning_content")
+                    if isinstance(thought, str) and thought:
+                        take([(True, thought)])
                     if delta.get("content"):
-                        content.append(delta["content"])
-                        if on_text is not None:
-                            on_text(delta["content"])
+                        take(tags.feed(delta["content"]))
                     # A call comes whole (Ollama) or in pieces (OpenAI, llama.cpp): its name once,
                     # its arguments as text in pieces
                     for tc in delta.get("tool_calls") or []:
@@ -104,6 +149,7 @@ class LLM:
                             slot["args"] = json.dumps(args)
                         elif args:
                             slot["args"] += args
+        take(tags.flush())
         out = []
         for i, slot in sorted(calls.items()):
             entry = {"id": slot["id"] or f"call_{i}", "name": slot["name"], "arguments": {}}
@@ -111,6 +157,6 @@ class LLM:
                 parsed = json.loads(slot["args"]) if slot["args"].strip() else {}
                 entry["arguments"] = parsed if isinstance(parsed, dict) else {}
             except ValueError:
-                entry["bad"] = slot["args"][:200]
+                entry["bad"] = slot["args"]
             out.append(entry)
-        return {"content": "".join(content), "tool_calls": out}
+        return {"content": "".join(content), "reasoning": "".join(reasoning), "tool_calls": out}

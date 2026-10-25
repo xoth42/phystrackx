@@ -13,30 +13,33 @@ import harness as h  # noqa: F401  (sets up Qt before PySide6 is imported)
 
 from phystrack_qt import windows  # noqa: E402
 from phystrack_qt.agent.chat_panel import ChatPanel  # noqa: E402
-from phystrack_qt.agent.llm import Cancelled  # noqa: E402
+from phystrack_qt.agent.llm import Cancelled, _ThinkTags  # noqa: E402
 from phystrack_qt.agent.session import AgentSession  # noqa: E402
 from test_tracking import make_clip  # noqa: E402
 
 
 class ScriptedModel:
-    """Plays the model: each turn is a dict {"say": text, "calls": [(tool, args)]}, or a function
+    """Plays the model: each turn is a dict {"think": reasoning, "say": text, "calls": [(tool, args)]}, or a function
     (messages, on_text, cancelled) -> reply (to look at what it was sent, or to be slow)."""
 
     def __init__(self, turns: list) -> None:
-        self.turns, self.sent = list(turns), []
+        self.turns, self.sent, self.max_tokens = list(turns), [], []
         self.url, self.model, self.is_ollama = "scripted", "scripted", False
 
     def models(self) -> list:
         return ["scripted"]
 
-    def chat(self, messages, tools, on_text=None, cancelled=None, max_tokens=400) -> dict:
+    def chat(self, messages, tools, on_text=None, cancelled=None, max_tokens=400, on_reasoning=None) -> dict:
         self.sent.append(messages)
+        self.max_tokens.append(max_tokens)
         turn = self.turns.pop(0)
         if callable(turn):
             return turn(messages, on_text, cancelled)
+        if turn.get("think") and on_reasoning:
+            on_reasoning(turn["think"])
         if turn.get("say") and on_text:
             on_text(turn["say"])
-        return {"content": turn.get("say", ""), "tool_calls": [
+        return {"content": turn.get("say", ""), "reasoning": turn.get("think", ""), "tool_calls": [
             {"id": f"c{len(self.sent)}{i}", "name": name, "arguments": args}
             for i, (name, args) in enumerate(turn.get("calls", []))]}
 
@@ -115,6 +118,40 @@ def test_assistant() -> None:
     results = [m["content"] for m in session.messages if m["role"] == "tool"][-2:]
     h.check("errors and unknown tools are reported to the model, not raised",
             "no tool" in results[0] and "unknown kinds" in results[1], str(results))
+
+    # Reasoning: hidden until the checkbox is on, and never sent back to the model
+    model.turns = [{"think": "The user wants the windows listed.", "calls": [("windows", {})]}, {"say": "Listed."}]
+    session.send("List them")
+    h.check("a reasoning request ends", h.pump(lambda: session.state == "idle" and not model.turns, 30))
+    h.check("reasoning goes to the transcript",
+            ("reasoning", "The user wants the windows listed.") in session.transcript, str(session.transcript[-4:]))
+    h.check("reasoning is hidden by default", "wants the windows" not in panel.view.toPlainText())
+    other = ChatPanel(session)   # Another window's dock
+    panel.reasoning_box.setChecked(True)
+    h.check("the checkbox shows the reasoning, in every dock",
+            "wants the windows" in panel.view.toPlainText() and other.reasoning_box.isChecked()
+            and "wants the windows" in other.view.toPlainText())
+    h.check("reasoning is not sent back to the model",
+            all("wants the windows" not in json.dumps(m) for m in model.sent[-1]))
+    panel.reasoning_box.setChecked(False)
+    h.check("unchecked, it is hidden again", "wants the windows" not in other.view.toPlainText())
+    other.deleteLater()   # On the Qt thread: a panel freed by Python's collector elsewhere warns about its timer
+    h.pump(timeout=0.1)
+
+    # The chat shows a tool's result whole (the model still gets it cut)
+    from phystrack_qt.agent.session import _summary
+    long_error = "x" * 500 + "END"
+    h.check("an error is shown whole", _summary("plots", {"error": long_error}).endswith("END"))
+    h.check("a result is shown whole", _summary("data", {"ok": {"rows": "y" * 500 + "END"}}).endswith('END"}'))
+    h.check("a recipe's check is shown whole",
+            _summary("run_recipe", {"ok": {"done": [], "check": [3, "fit", "z" * 300 + "END"]}}).endswith("END"))
+
+    # <think> tags in the text are split out as reasoning, also when a tag is cut between pieces
+    tags = _ThinkTags()
+    pieces = [p for chunk in ["<th", "ink>plan it</thi", "nk>Hello <b", ">x"] for p in tags.feed(chunk)] + tags.flush()
+    h.check("think tags split into reasoning and reply",
+            "".join(t for r, t in pieces if r) == "plan it" and "".join(t for r, t in pieces if not r) == "Hello <b>x",
+            str(pieces))
 
     # A click anywhere else takes the text box's selection away (not only a click on the video)
     from PySide6.QtCore import QEvent, QPointF, Qt

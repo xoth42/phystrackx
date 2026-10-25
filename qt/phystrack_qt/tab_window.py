@@ -3,7 +3,8 @@ The window that holds trials as tabs: a tab bar (one tab per trial, named after 
 the trial shown. Each tab is a MainWindow, embedded: it keeps its own docks, status bar, menus and keys.
 
 Menus: the window's menu bar shows the current tab's menus (they are the tab's own QMenus, added here), and
-a Window menu of its own. A tab's own menu bar is hidden and not native, so only the current tab's menu
+a Window menu of its own. Settings… (Cmd+,) is in the app menu on macOS (Qt moves it there), else in a
+Settings menu before Window. A tab's own menu bar is hidden and not native, so only the current tab's menu
 shortcuts are live; a tab that is not shown is hidden, so its keys (QShortcut) are not live either.
 
 Ctrl+T (Cmd+T) adds a tab here, Ctrl+N (Cmd+N) opens another of these windows (windows.new_window).
@@ -180,6 +181,18 @@ class TabWindow(QMainWindow):
             action.setShortcut(QKeySequence(f"Ctrl+{n}"))
             action.triggered.connect(lambda _=False, k=n: self.select(k))
             self.addAction(action)
+        # Settings…: on macOS, Qt moves an action with this role to the app menu, wherever it is put
+        self.settings_action = QAction("Settings…", self)
+        self.settings_action.setMenuRole(QAction.MenuRole.PreferencesRole)
+        self.settings_action.setShortcut(QKeySequence("Ctrl+,"))
+        self.settings_action.triggered.connect(self._open_settings)
+        self.settings_menu = None
+        if sys.platform == "darwin":
+            self.window_menu.insertAction(self.window_menu.actions()[0], self.settings_action)
+        else:
+            self.settings_menu = QMenu("Settings", self)
+            self.settings_menu.addAction(self.settings_action)
+            self.menuBar().addMenu(self.settings_menu)
         self.menuBar().addMenu(self.window_menu)
         windows.add_host(self)
 
@@ -250,12 +263,18 @@ class TabWindow(QMainWindow):
             tab.view.setFocus()
 
     def _show_menus(self, tab) -> None:
-        """This window's menu bar: the tab's menus, then the Window menu."""
+        """This window's menu bar: the tab's menus, then Settings (not on macOS) and the Window menu."""
         bar = self.menuBar()
         bar.clear()   # Takes the menus out; they belong to their tab, so are not deleted
         for action in tab.menuBar().actions():
             bar.addAction(action)
+        if self.settings_menu is not None:
+            bar.addMenu(self.settings_menu)
         bar.addMenu(self.window_menu)
+
+    def _open_settings(self) -> None:
+        from . import settings_dialog
+        settings_dialog.show()
 
     def _fill_window_menu(self) -> None:
         """The Window menu lists the tabs; choosing one shows it."""

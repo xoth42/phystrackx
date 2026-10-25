@@ -5,7 +5,8 @@ a box to type in, and Stop / Start. Every window has one; they all show the one 
 While the assistant works, the main window's status bar says that Space stops it. After Send, the
 keyboard goes back to the picture, so Space does that (in the text box, Space types a space). A
 question from the assistant shows its answers as buttons. While it starts or thinks and no text has
-come yet, a blinking cursor shows that it is working.
+come yet, a blinking cursor shows that it is working. Reasoning (a checkbox, the same in every
+dock) shows a thinking model's reasoning, in italics, before each reply.
 """
 
 import html
@@ -13,7 +14,7 @@ import json
 import threading
 
 from PySide6.QtCore import QEvent, QObject, Qt, QTimer, Signal
-from PySide6.QtWidgets import (QApplication, QComboBox, QHBoxLayout, QLabel, QLineEdit, QPushButton,
+from PySide6.QtWidgets import (QApplication, QCheckBox, QComboBox, QHBoxLayout, QLabel, QLineEdit, QPushButton,
                                QTextBrowser, QVBoxLayout, QWidget)
 
 STATES = {"setup": "setting up…", "thinking": "thinking…", "acting": "working…", "waiting": "asks you",
@@ -28,8 +29,8 @@ RUNNER_TEXT = {"checking": "checking the model runner…", "starting": "starting
 class _ClickAway(QObject):
     """Takes the selection out of the text box when the mouse is pressed anywhere else in the app."""
 
-    def __init__(self, box: QLineEdit) -> None:
-        super().__init__()
+    def __init__(self, box: QLineEdit, parent: QObject) -> None:
+        super().__init__(parent)
         self.box = box
 
     def eventFilter(self, watched, event) -> bool:
@@ -46,6 +47,7 @@ class ChatPanel(QWidget):
         self.session = session
         self.focus_after_send = focus_after_send   # Where the keyboard goes after Send (the picture)
         self._live = ""                            # The reply being written
+        self._live_thought = ""                    # Its reasoning, as it is written
 
         layout = QVBoxLayout(self)
         layout.setContentsMargins(4, 4, 4, 4)
@@ -57,6 +59,11 @@ class ChatPanel(QWidget):
         self.model_box.setToolTip(f"The local model, from the runner at {session.llm.url} "
                                   "(PHYSTRACK_LLM_URL: Ollama here; Strata or llama-server elsewhere)")
         top.addWidget(self.model_box, 1)
+        self.reasoning_box = QCheckBox("Reasoning")
+        self.reasoning_box.setToolTip("Show the model's reasoning (thinking models only, such as qwen3:4b)")
+        self.reasoning_box.setChecked(session.show_reasoning)
+        self.reasoning_box.toggled.connect(session.set_show_reasoning)
+        top.addWidget(self.reasoning_box)
         self.state_label = QLabel()
         top.addWidget(self.state_label)
         layout.addLayout(top)
@@ -83,14 +90,13 @@ class ChatPanel(QWidget):
             bottom.addWidget(w, 1 if w is self.input else 0)
         layout.addLayout(bottom)
 
-        app = QApplication.instance()
-        click_away = _ClickAway(self.input)
-        app.installEventFilter(click_away)
-        self.input.destroyed.connect(lambda: app.removeEventFilter(click_away))   # Its panel is gone
+        # Lives as long as the panel: Qt stops using an event filter once it is deleted
+        QApplication.instance().installEventFilter(_ClickAway(self.input, self))
 
         session.event.connect(self._on_event)
         session.state_changed.connect(self._on_state)
         session.runner.changed.connect(self._on_runner)
+        session.view_changed.connect(self._on_view)
         self._models_ready.connect(self._fill_models)
         self._cursor_on = True
         self._blink = QTimer(self)   # The cursor while the assistant starts or thinks
@@ -125,9 +131,15 @@ class ChatPanel(QWidget):
     def _on_event(self, kind: str, text: str) -> None:
         if kind == "part":
             self._live += text
+        elif kind == "thought_part":
+            self._live_thought += text
+            if not self.session.show_reasoning:
+                return   # Nothing new to show
         else:
-            if kind == "assistant" or kind in ("tool", "error", "status"):
+            if kind in ("assistant", "tool", "error", "status"):
                 self._live = ""
+            if kind in ("reasoning", "assistant", "tool", "error", "status"):
+                self._live_thought = ""
             if kind == "ask":
                 self._show_options(json.loads(text).get("options", []))
             elif kind in ("user", "status", "error"):
@@ -142,9 +154,15 @@ class ChatPanel(QWidget):
         self.send_btn.setEnabled(state in ("idle", "setup", "waiting", "stopped"))
         self.model_box.setEnabled(state == "idle")
         if state == "idle":
-            self._live = ""
+            self._live = self._live_thought = ""
             self._show_options([])
         self._render()   # The cursor comes and goes with the state
+
+    def _on_view(self) -> None:
+        self.reasoning_box.blockSignals(True)
+        self.reasoning_box.setChecked(self.session.show_reasoning)
+        self.reasoning_box.blockSignals(False)
+        self._render()
 
     def _on_runner(self, status: str, detail: str) -> None:
         self._refresh_label()
@@ -180,16 +198,25 @@ class ChatPanel(QWidget):
     def _render(self) -> None:
         # No colours: the text uses the window's own text colour, so it reads in light and dark themes alike
         rows = []
+        show_reasoning = self.session.show_reasoning
         for kind, text in self.session.transcript:
+            if kind == "reasoning":
+                if show_reasoning:
+                    rows.append(f'<p style="margin: 2px 0;"><i>{html.escape(text).replace(chr(10), "<br>")}</i></p>')
+                continue
             if kind == "ask":
                 text = json.loads(text).get("q", "")
             body = html.escape(text).replace("\n", "<br>")
             prefix = {"user": "<b>You:</b> ", "assistant": "", "tool": "▸ ", "result": "&nbsp;&nbsp;",
                       "ask": "<b>?</b> ", "status": "", "error": "<b>!</b> "}.get(kind, "")
             rows.append(f'<p style="margin: 2px 0;">{prefix}{body}</p>')
+        if show_reasoning and self._live_thought:
+            cursor = "" if self._live else "▍"
+            rows.append(f'<p style="margin: 2px 0;"><i>{html.escape(self._live_thought).replace(chr(10), "<br>")}'
+                        f'</i>{cursor}</p>')
         if self._live:
             rows.append(f'<p style="margin: 2px 0;">{html.escape(self._live)}▍</p>')
-        elif self._waiting_for_text():
+        elif self._waiting_for_text() and not (show_reasoning and self._live_thought):
             # Off, a space keeps the line, so the text does not move up and down each blink
             cursor = "▍" if self._cursor_on else "&nbsp;"
             rows.append(f'<p style="margin: 2px 0;">{cursor}</p>')

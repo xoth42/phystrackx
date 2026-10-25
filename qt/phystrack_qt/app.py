@@ -50,6 +50,8 @@ def run(files: list[str]) -> None:
     app.setApplicationName("PhysTrackX")
     app.setApplicationDisplayName("PhysTrackX")
     app.setApplicationVersion(__version__)
+    from phystrack_qt import settings_dialog
+    settings_dialog.name_settings_item(app)   # "Settings…" in the app menu, as macOS names it now
 
     wake = stop_on_ctrl_c(app)   # noqa: F841  (kept alive for the run)
     # The first trial, in a tab of the first window

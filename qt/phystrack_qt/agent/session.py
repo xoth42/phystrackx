@@ -13,6 +13,8 @@ Its lifetime, kept simple so a small model cannot get it wrong:
 - Stop (Space, or the button) cuts off the reply being written or the tool call under way, and
   the session waits. Start (with a note, if typed) calls resume and tells the model what the user
   changed meanwhile, then goes on. End drops the request.
+- A thinking model's reasoning goes to the transcript (the docks show it when Reasoning is on),
+  never back to the model.
 - The model runner (runner.py) is made ready at launch (setup) and before each request. Ollama
   missing, or its model not downloaded: a question asks (y or n) before anything is installed or
   downloaded. Declined, the request says why.
@@ -26,6 +28,7 @@ import threading
 
 from PySide6.QtCore import QObject, Signal
 
+from .. import settings as app_settings
 from .. import windows
 from . import bridge
 from .llm import LLM, Cancelled, LLMError
@@ -34,8 +37,8 @@ from .specs import SPECS, json_schema
 
 MODEL_TOOLS = ["windows", "videos", "state", "recipe", "open", "run_recipe", "plots", "data", "revert"]
 MAX_CALLS = 40          # Tool calls in one request before the session gives up
-RESULT_CHARS = 1500     # A tool result, as the model gets it
-OLD_RESULT_CHARS = 160  # A tool result KEEP_FULL messages ago
+RESULT_CHARS = 1500     # A tool result, as the model gets it (the chat shows it whole)
+OLD_RESULT_CHARS = 160  # A tool result KEEP_FULL messages ago, as the model gets it
 KEEP_FULL = 12
 MAX_MESSAGES = 80       # Older whole requests are dropped past this
 
@@ -77,28 +80,29 @@ def _payload(result: dict):
     return result["ok"] if "ok" in result else result
 
 
-def _compact(result: dict, limit: int = RESULT_CHARS) -> str:
+def _compact(result: dict, limit: int | None = RESULT_CHARS) -> str:
+    """The result as JSON, cut at limit characters (None: whole)."""
     text = json.dumps(_payload(result), separators=(",", ":"), ensure_ascii=False, default=str)
-    return text if len(text) <= limit else text[:limit] + "…"
+    return text if limit is None or len(text) <= limit else text[:limit] + "…"
 
 
 def _summary(name: str, result: dict) -> str:
-    """One line for the chat: what a tool call came to."""
+    """For the chat, whole: what a tool call came to."""
     if "error" in result:
-        return f"✗ {result['error'][:200]}"
+        return f"✗ {result['error']}"
     if "stopped" in result:
         return "■ stopped"
     out = _payload(result)
     if name == "run_recipe" and isinstance(out, dict):
         done = ", ".join(step[1] for step in out.get("done", []))
         if "check" in out:
-            return f"done: {done or '-'}; check at step {out['check'][0]}: {out['check'][2][:160]}"
+            return f"done: {done or '-'}; check at step {out['check'][0]}: {out['check'][2]}"
         if "failed" in out:
-            return f"done: {done or '-'}; failed at step {out['failed'][0]}: {out['failed'][2][:160]}"
+            return f"done: {done or '-'}; failed at step {out['failed'][0]}: {out['failed'][2]}"
         if "stopped" in out:
             return f"done: {done or '-'}; stopped"
         return f"done: {done}"
-    return _compact(result, 220)
+    return _compact(result, None)
 
 
 class _Ended(Exception):
@@ -106,8 +110,10 @@ class _Ended(Exception):
 
 
 class AgentSession(QObject):
-    event = Signal(str, str)       # (kind, text): user | assistant | part | tool | result | ask | status | error | clear
+    # (kind, text): user | assistant | part | reasoning | thought_part | tool | result | ask | status | error | clear
+    event = Signal(str, str)
     state_changed = Signal(str)    # idle | setup | thinking | acting | waiting | stopped
+    view_changed = Signal()        # Reasoning shown or hidden, in every dock
 
     def __init__(self, llm=None) -> None:
         super().__init__()
@@ -124,6 +130,8 @@ class AgentSession(QObject):
         self._note = ""
         self._end = False
         self._thread: threading.Thread | None = None
+        self.settings = app_settings.shared()   # Show reasoning, and the reply length cap
+        self.settings.changed.connect(self._setting_changed)
 
     # --- From the docks (Qt thread) ----------------------------------------------------------------
     def send(self, text: str) -> None:
@@ -168,6 +176,18 @@ class AgentSession(QObject):
         if self.state == "stopped":
             self._end = True
             self._go.set()
+
+    @property
+    def show_reasoning(self) -> bool:
+        """The docks show the model's reasoning (a setting, kept between runs)."""
+        return self.settings.get("show_reasoning")
+
+    def set_show_reasoning(self, show: bool) -> None:
+        self.settings.set("show_reasoning", bool(show))   # view_changed follows
+
+    def _setting_changed(self, key: str) -> None:
+        if key == "show_reasoning":
+            self.view_changed.emit()
 
     def clear(self) -> None:
         if self.state == "idle":
@@ -240,17 +260,27 @@ class AgentSession(QObject):
                 if windows.AGENT.stopped:
                     self._pause()
                 self._set_state("thinking")
+                thought: list = []   # Kept as it comes, so a reply cut off keeps its reasoning so far
+
+                def on_reasoning(piece: str) -> None:
+                    thought.append(piece)
+                    self.event.emit("thought_part", piece)
                 try:
                     reply = self.llm.chat(self._context(), self.tools,
                                           on_text=lambda piece: self.event.emit("part", piece),
-                                          cancelled=lambda: windows.AGENT.stopped)
+                                          cancelled=lambda: windows.AGENT.stopped, on_reasoning=on_reasoning,
+                                          max_tokens=self.settings.get("max_tokens"))
                 except Cancelled:
+                    if "".join(thought).strip():
+                        self._emit("reasoning", "".join(thought).strip())
                     self._emit("status", "(reply cut off)")
                     self._pause()
                     continue
                 except LLMError as e:
                     self._emit("error", str(e))
                     return
+                if (reply.get("reasoning") or "").strip():
+                    self._emit("reasoning", reply["reasoning"].strip())
                 calls = reply["tool_calls"]
                 message = {"role": "assistant", "content": reply["content"]}
                 if calls:
