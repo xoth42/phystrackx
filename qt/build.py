@@ -76,30 +76,62 @@ def dev() -> None:
 # Test files with checks on how long something takes: run alone, after the others, so a busy machine does not
 # fail them
 TIMED_TESTS = {"test_plots.py", "test_stop.py"}
+TEST_TIMEOUT = 300   # s: one test file (PHYSTRACK_TEST_TIMEOUT); the longest takes about 30 s here, 2 min on CI
+
+
+def _kill_tree(proc: subprocess.Popen) -> None:
+    """Stops a test file and every process it started (an app it launched, a model runner)."""
+    try:
+        if sys.platform == "win32":
+            subprocess.run(["taskkill", "/T", "/F", "/PID", str(proc.pid)], capture_output=True, timeout=30)
+        else:
+            os.killpg(proc.pid, 9)
+    except (OSError, subprocess.SubprocessError):
+        pass
+    try:
+        proc.kill()
+        proc.wait(timeout=30)
+    except (OSError, subprocess.SubprocessError):
+        pass
 
 
 def test(jobs: int | None = None) -> int:
     """Runs each tests/test_*.py as a script (each exits non-zero on a failed check). The files run several at
     once (`jobs`; PHYSTRACK_TEST_JOBS, else half the CPUs), each in a test folder of its own; the timed ones
-    (TIMED_TESTS) run after them, one at a time. A file's output is printed whole when it ends, with its time."""
+    (TIMED_TESTS) run after them, one at a time. A file's output is printed whole when it ends, with its time.
+    A file still running after PHYSTRACK_TEST_TIMEOUT seconds (TEST_TIMEOUT) is stopped, with every process
+    it started, and fails: its output so far is printed, so the log says where it hung. The output goes to
+    a file, not a pipe: a process a test leaves behind could hold a pipe open, and the run wait on it."""
     from concurrent.futures import ThreadPoolExecutor
     import time
 
     jobs = jobs or int(os.environ.get("PHYSTRACK_TEST_JOBS") or 0) or max(1, (os.cpu_count() or 2) // 2)
     work = os.path.join(tempfile.gettempdir(), "phystrack_qt_tests")
     scripts = sorted(glob.glob(os.path.join(QT, "tests", "test_*.py")))
+    timeout = float(os.environ.get("PHYSTRACK_TEST_TIMEOUT") or TEST_TIMEOUT)
     failed = []
 
     def run(script: str) -> None:
         name = os.path.basename(script)
-        env = dict(os.environ, PHYSTRACK_QT_TEST_WORK=os.path.join(work, os.path.splitext(name)[0]))
+        folder = os.path.join(work, os.path.splitext(name)[0])
+        os.makedirs(folder, exist_ok=True)
+        env = dict(os.environ, PHYSTRACK_QT_TEST_WORK=folder, PYTHONUNBUFFERED="1")   # Output so far, if stopped
+        log_path = os.path.join(folder, "output.log")
         t0 = time.time()
-        done = subprocess.run([sys.executable, script], cwd=os.path.join(QT, "tests"), env=env,
-                              stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True,
-                              encoding="utf-8", errors="replace")
-        print(f"== {name} ({time.time() - t0:.0f} s{', FAILED' if done.returncode else ''})\n{done.stdout}",
-              flush=True)
-        if done.returncode:
+        with open(log_path, "wb") as log:
+            proc = subprocess.Popen([sys.executable, script], cwd=os.path.join(QT, "tests"), env=env,
+                                    stdout=log, stderr=subprocess.STDOUT, stdin=subprocess.DEVNULL,
+                                    start_new_session=sys.platform != "win32")
+            try:
+                code = proc.wait(timeout=timeout)
+                verdict = ", FAILED" if code else ""
+            except subprocess.TimeoutExpired:
+                _kill_tree(proc)
+                code, verdict = 1, f", TIMED OUT after {timeout:.0f} s: stopped"
+        with open(log_path, encoding="utf-8", errors="replace") as f:
+            output = f.read()
+        print(f"== {name} ({time.time() - t0:.0f} s{verdict})\n{output}", flush=True)
+        if code:
             failed.append(name)
 
     t0 = time.time()

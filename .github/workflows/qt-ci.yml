@@ -36,6 +36,7 @@ jobs:
   test:
     name: Test (${{ matrix.os }})
     runs-on: ${{ matrix.os }}
+    timeout-minutes: 40   # Usually 1-11 min; a hung test file is stopped sooner (build.py TEST_TIMEOUT)
     strategy:
       fail-fast: false
       matrix:
