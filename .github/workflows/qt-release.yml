@@ -140,8 +140,21 @@ jobs:
           timestamp-rfc3161: http://timestamp.acs.microsoft.com
           timestamp-digest: SHA256
 
-      - name: Package
+      - name: Package (on Windows, the zip and the installer)
         run: uv run --group build python build.py package
+
+      # The installer is signed after it is built: the program inside it is already signed above
+      - name: Sign the installer (Windows)
+        if: runner.os == 'Windows' && env.AZURE_SIGNING_ACCOUNT != ''
+        uses: azure/trusted-signing-action@v0.5.1
+        with:
+          endpoint: https://eus.codesigning.azure.net/
+          trusted-signing-account-name: ${{ env.AZURE_SIGNING_ACCOUNT }}
+          certificate-profile-name: ${{ env.AZURE_CERTIFICATE_PROFILE }}
+          files: ${{ github.workspace }}/qt/build/PhysTrackX-Setup.exe
+          file-digest: SHA256
+          timestamp-rfc3161: http://timestamp.acs.microsoft.com
+          timestamp-digest: SHA256
 
       - name: Upload the packages
         uses: actions/upload-artifact@v4
@@ -152,6 +165,7 @@ jobs:
             qt/build/*.zip
             qt/build/*.tar.gz
             qt/build/*.AppImage
+            qt/build/PhysTrackX-Setup.exe
           if-no-files-found: error
 
   publish:

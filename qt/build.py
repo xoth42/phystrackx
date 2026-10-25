@@ -11,7 +11,8 @@ environment from pyproject.toml and uv.lock, so no venv is set up by hand:
                                      release build and the wheel need them)
     uv run --group build python build.py app
                                      Build the app and package it: macOS PhysTrackX-<v>-macos-<arch>.dmg,
-                                     Windows .zip, Linux .tar.gz (and an AppImage if APPIMAGETOOL is set).
+                                     Windows .zip and PhysTrackX-Setup.exe (needs Inno Setup 6), Linux .tar.gz
+                                     (and an AppImage if APPIMAGETOOL is set).
                                      On macOS it is signed first, if PHYSTRACK_CODESIGN_IDENTITY is set.
     uv run --group build python build.py build | package
                                      The two halves of app: build the app folder; package it. The release
@@ -169,6 +170,8 @@ def package() -> str:
                                   root_dir=DIST, base_dir=APP_NAME)
     if sys.platform.startswith("linux") and os.environ.get("APPIMAGETOOL"):
         make_appimage(folder, name)
+    if WINDOWS:
+        make_installer(folder)
     print(f"Packaged: {archive}")
     return archive
 
@@ -202,6 +205,20 @@ def make_appimage(folder: str, name: str) -> str:
     shutil.copy(os.path.join(ICONS, "icon.png"), os.path.join(appdir, "phystrackx.png"))
     out = os.path.join(BUILD, name + ".AppImage")
     run(os.environ["APPIMAGETOOL"], appdir, out)
+    print(f"Packaged: {out}")
+    return out
+
+
+def make_installer(folder: str) -> str:
+    """Windows: PhysTrackX-Setup.exe, which installs the app folder for the current user (packaging/PhysTrackX.iss).
+    Needs Inno Setup 6: ISCC.exe on PATH, or in its default folder."""
+    iscc = shutil.which("ISCC.exe") or os.path.join(
+        os.environ.get("ProgramFiles(x86)", r"C:\Program Files (x86)"), "Inno Setup 6", "ISCC.exe")
+    if not os.path.exists(iscc):
+        sys.exit("The installer needs Inno Setup 6 (https://jrsoftware.org/isdl.php, or `choco install innosetup`).")
+    run(iscc, os.path.join(QT, "packaging", "PhysTrackX.iss"), f"/DVersion={version()}",
+        f'/DSourceDir="{folder}"', f'/DOutputDir="{BUILD}"')
+    out = os.path.join(BUILD, f"{APP_NAME}-Setup.exe")
     print(f"Packaged: {out}")
     return out
 

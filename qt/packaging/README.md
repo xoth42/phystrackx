@@ -12,14 +12,19 @@ from `qt/` through uv, which makes the build environment from `uv.lock`.
 | `uv run --group build python build.py install` | Builds and installs the app (macOS: `/Applications`, plus `phystrackx` on PATH) |
 
 Packages land in `qt/build/` (or `PHYSTRACK_BUILD_DIR`), named `PhysTrackX-<version>-<os>-<arch>`:
-a `.dmg` on macOS, a `.zip` on Windows, a `.tar.gz` on Linux (plus an `.AppImage` when `APPIMAGETOOL`
-points at the appimagetool).
+a `.dmg` on macOS, a `.zip` and `PhysTrackX-Setup.exe` on Windows, a `.tar.gz` on Linux (plus an `.AppImage`
+when `APPIMAGETOOL` points at the appimagetool). The Windows installer needs Inno Setup 6
+(`choco install innosetup`, or <https://jrsoftware.org/isdl.php>).
 
 ## Parts
 
 - `packaging/phystrackx.spec`: the PyInstaller recipe. One folder, not one file: the app starts
   faster (nothing is unpacked at each start), and signing works on each file.
-- `packaging/entry.py`: what the packaged program runs (the same as `phystrackx`).
+- `packaging/entry.py`: what the packaged program runs (the same as `phystrackx`). On Windows, which has
+  no console, its output goes to `%LOCALAPPDATA%\PhysTrackX\Logs\phystrackx.log`.
+- `packaging/PhysTrackX.iss`: the Windows installer (Inno Setup). Per user, so no administrator prompt; it
+  installs to `%LOCALAPPDATA%\Programs\PhysTrackX`, adds a Start menu entry and a desktop icon (ticked by
+  default), and an uninstaller in Settings > Apps. Its AppId never changes, so a new installer upgrades in place.
 - `packaging/entitlements.plist`: the two hardened-runtime exceptions a bundled Python needs. Nothing else.
 - `build.py icons`: makes `icon.icns` from `assets/logos/logo.png` (macOS) and the Linux PNG. Windows uses `assets/icon.ico`.
 - `.github/workflows/qt-ci.yml` (repo root): on every change, installs the command on Windows, macOS
@@ -125,9 +130,12 @@ AppImages need no signing to run. GPG-signing the release files is optional (not
   is arm64 only. A universal build (both chips) is a later step.
 - **Size.** The app is about 470 MB, most of it Qt. Trimming the unused Qt modules is a later step.
   ffmpeg is currently bundled twice (in `Frameworks` and `Resources`).
-- **Windows** ships as a `.zip` folder, not an installer. An installer (Inno Setup or MSI) is a later step.
+- **Windows installer, not yet run.** The release workflow builds and signs `PhysTrackX-Setup.exe`, but it
+  has not run on Windows yet. The zip stays as the fallback. The installer's publisher name is `PhysTrackX`;
+  it should match the certificate's name once signing is set up.
 - **Opening a file from Finder** (double-clicking a `.phystrack` or video) is not wired yet: macOS
   passes such files as events, not as command-line arguments. The command line works.
 - **The SAM model** is not bundled (375 MB). The Qt app does not use it (`agent/relocate.py`); the Tk app does.
-- **Console window on Windows.** The program keeps a console, so `phystrackx file.mp4` works in a
-  terminal; double-clicking shows a console behind the window.
+- **No console on Windows.** The packaged program has no console window, so `phystrackx file.mp4` in a
+  terminal is not available from the packaged app: use the command from `build.py dev` (or `install.sh`)
+  for that. On macOS the console is kept.

@@ -20,8 +20,13 @@ From the repo root, a single script installs the app and installs uv first if it
 
 `build.py dev` needs [uv](https://docs.astral.sh/uv/) and nothing else: uv makes the Python 3.12 and
 the dependencies, in its own folder, so no venv is set up by hand. Rerun it after changing
-`pyproject.toml`. For a packaged app (macOS `.dmg`, Windows `.zip`, Linux AppImage), see
+`pyproject.toml`. For a packaged app (macOS `.dmg`, Windows installer, Linux AppImage), see
 `packaging/README.md`.
+
+**Windows:** download [PhysTrackX-Setup.exe](https://github.com/xoth42/phystrackx/releases/latest/download/PhysTrackX-Setup.exe)
+and run it. It installs for your user only (no administrator prompt), adds a desktop icon and a Start menu
+entry, and uninstalls from Settings > Apps. Windows may say "Windows protected your PC" on a new release:
+choose More info, then Run anyway.
 
 Without installing, from this folder: `uv run python run.py [video or project]`. Tests:
 `uv run python build.py test`.
