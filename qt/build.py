@@ -216,8 +216,10 @@ def make_installer(folder: str) -> str:
         os.environ.get("ProgramFiles(x86)", r"C:\Program Files (x86)"), "Inno Setup 6", "ISCC.exe")
     if not os.path.exists(iscc):
         sys.exit("The installer needs Inno Setup 6 (https://jrsoftware.org/isdl.php, or `choco install innosetup`).")
+    # No quotes around the paths: subprocess already quotes one that has spaces, and extra quotes would reach
+    # Inno Setup as part of the path
     run(iscc, os.path.join(QT, "packaging", "PhysTrackX.iss"), f"/DVersion={version()}",
-        f'/DSourceDir="{folder}"', f'/DOutputDir="{BUILD}"')
+        f"/DSourceDir={folder}", f"/DOutputDir={BUILD}")
     out = os.path.join(BUILD, f"{APP_NAME}-Setup.exe")
     print(f"Packaged: {out}")
     return out
