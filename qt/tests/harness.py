@@ -39,8 +39,45 @@ os.environ["PHYSTRACK_QT_HOME"] = os.path.join(WORK, "home")  # The recent list 
 _failures: list[str] = []
 
 
+DIALOG_TIMEOUT = 20.0   # s: a modal dialog left open this long, with nobody to answer it, fails the test
+_watchdog = None
+
+
 def app() -> QApplication:
-    return QApplication.instance() or QApplication(sys.argv)
+    instance = QApplication.instance() or QApplication(sys.argv)
+    _watch_dialogs()
+    return instance
+
+
+def _watch_dialogs() -> None:
+    """A modal dialog the test does not answer would wait for a click forever: after DIALOG_TIMEOUT it is
+    printed (title and text), closed, and the test fails. A test that answers its own dialogs does so in a
+    moment, so this never touches those."""
+    global _watchdog
+    if _watchdog is not None:
+        return
+    from PySide6.QtCore import QTimer
+    from PySide6.QtWidgets import QDialog, QMessageBox
+    seen = {"widget": None, "since": 0.0}
+
+    def look() -> None:
+        dialog = QApplication.activeModalWidget()
+        if dialog is None or dialog is not seen["widget"]:
+            seen["widget"], seen["since"] = dialog, time.time()
+            return
+        if time.time() - seen["since"] < DIALOG_TIMEOUT:
+            return
+        text = dialog.text() if isinstance(dialog, QMessageBox) else ""
+        check(f"no dialog is left waiting for an answer: {dialog.windowTitle()!r}", False, text)
+        seen["widget"] = None
+        if isinstance(dialog, QDialog):
+            dialog.reject()
+        else:
+            dialog.close()
+
+    _watchdog = QTimer()
+    _watchdog.timeout.connect(look)
+    _watchdog.start(1000)
 
 
 def window():
