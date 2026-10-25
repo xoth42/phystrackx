@@ -14,6 +14,7 @@ to go back to it); there can be any number of trials, each a tab (windows.py, ta
 """
 
 import copy
+import math
 import os
 import time
 
@@ -24,6 +25,7 @@ from PySide6.QtWidgets import (QDialog, QDockWidget, QFileDialog, QFrame, QHBoxL
                                QMessageBox, QProgressBar, QPushButton, QSlider, QVBoxLayout,
                                QWidget)
 
+from core.autoaxis import snap_axis
 from core.autoruler import snap_ruler
 from core.units import parse_length
 
@@ -180,6 +182,22 @@ class MainWindow(QMainWindow):
         self.ruler_panel.hide()
         side.addWidget(self.ruler_panel)
         side.addWidget(self.axis_btn)
+        # The axes' own buttons, shown once they are placed
+        self.axes_panel = QFrame()
+        panel = QVBoxLayout(self.axes_panel)
+        panel.setContentsMargins(0, 0, 0, 0)
+        self.auto_axis_btn = QPushButton("Auto Axis")
+        self.auto_axis_btn.setToolTip("Turn the axes to line up with the straight line nearest one "
+                                      "of them (a tube, a track), sliding the origin onto it")
+        self.undo_axis_btn = QPushButton("Undo Auto Axis")
+        for button, action in ((self.auto_axis_btn, lambda: self.auto_axis()),  # Not clicked's bool
+                               (self.undo_axis_btn, self.undo_auto_axis)):
+            button.setMinimumHeight(32)
+            button.clicked.connect(action)
+            panel.addWidget(button)
+        self.undo_axis_btn.setEnabled(False)
+        self.axes_panel.hide()
+        side.addWidget(self.axes_panel)
         side.addWidget(self.mark_btn)
         side.addWidget(self.circle_btn)
         side.addWidget(self.find_btn)
@@ -420,6 +438,8 @@ class MainWindow(QMainWindow):
         if self.axes is not None:
             self.view.scene().removeItem(self.axes)
             self.axes = None
+        self.axes_panel.hide()
+        self.undo_axis_btn.setEnabled(False)
         if self.ruler is not None:
             self.view.scene().removeItem(self.ruler)
             self.ruler = None
@@ -942,6 +962,9 @@ class MainWindow(QMainWindow):
         axes = AxesItem(length, self.view.picture)
         axes.changed.connect(self._report_axes)
         axes.changed.connect(lambda: self._touch("axes"))
+        axes.changed.connect(lambda: self.undo_axis_btn.setEnabled(axes.can_undo()))
+        self.axes_panel.show()
+        self.undo_axis_btn.setEnabled(False)
         return axes
 
     def start_axis(self) -> None:
@@ -964,6 +987,48 @@ class MainWindow(QMainWindow):
         self.statusBar().showMessage(f"Axes: origin ({p.x():.1f}, {p.y():.1f}) px, "
                                      f"angle {self.axes.angle():.1f}°. Drag a line to move, the "
                                      "handle to rotate")
+
+    def auto_axis(self, axis: str | None = None) -> str | None:
+        """Lines the axes up with the straight line nearest them (core.autoaxis): mostly a turn,
+        with the origin slid a little onto the line. `axis` is "x" or "y"; by default both are
+        tried, and the one along the stronger line is used. Returns the axis lined up, or None
+        (with a message) when neither lies along a line."""
+        if self.axes is None:
+            return None
+        try:
+            found = self._find_axis_line(axis)
+        except ValueError as e:
+            QMessageBox.warning(self, "Auto Axis", str(e))
+            return None
+        which, origin, rotation = found
+        old_pos, old_rot = self.axes.pos(), self.axes.rotation()
+        self.axes.snap_to(origin, rotation)
+        slide = math.hypot(origin[0] - old_pos.x(), origin[1] - old_pos.y())
+        self.statusBar().showMessage(
+            f"Auto Axis lined the {which} axis up with the line beside it: turned "
+            f"{rotation - old_rot:+.2f}°, origin moved {slide:.1f} px. Undo Auto Axis puts it back")
+        return which
+
+    def _find_axis_line(self, axis: str | None = None) -> tuple[str, tuple[float, float], float]:
+        """(axis, origin, rotation) of the snapped axes; ValueError when no line is found."""
+        frame = self.source.frame(self.seek.value())
+        p = self.axes.pos()
+        found, errors = [], []
+        for which in ((axis,) if axis else ("x", "y")):
+            try:
+                origin, rotation, strength = snap_axis(frame, (p.x(), p.y()), self.axes.rotation(),
+                                                       which)
+                found.append((strength, which, origin, rotation))
+            except ValueError as e:
+                errors.append(str(e))
+        if not found:
+            raise ValueError(errors[0] + " Put an axis roughly along the line first (within 10°).")
+        _, which, origin, rotation = max(found)
+        return which, origin, rotation
+
+    def undo_auto_axis(self) -> None:
+        if self.axes is not None:
+            self.axes.undo_snap()
 
     # --- Tools -----------------------------------------------------------------------------------
     def _end_tools(self) -> None:

@@ -49,8 +49,10 @@ SPECS = {
     "ruler": ("Place or change the ruler: ends p1, p2; real length and unit (50, cm); auto snaps "
               "the ends to the ruler's ends.",
               {"p1": "pt?", "p2": "pt?", "length": "num?", "unit": "str?", "auto": "bool?"}, ""),
-    "axes": ("Place the axes: origin x, y; rot in degrees (clockwise).",
-             {"x": "num", "y": "num", "rot": "num?"}, ""),
+    "axes": ("Place or change the axes: origin x, y; rot in degrees (clockwise). auto turns them "
+             "(up to 10 deg) to line up with the nearest straight line (a tube, a track), sliding "
+             "the origin onto it; axis: x or y to line up (default: whichever lies along a line).",
+             {"x": "num?", "y": "num?", "rot": "num?", "auto": "bool?", "axis": "str?"}, ""),
     "mark": ("Mark an object to track: box on frame (default: the frame shown); auto fits its outline.",
              {"box": "box", "frame": "int?", "circle": "bool?", "auto": "bool?"}, ""),
     "remove": ("Remove object n.", {"n": "int"}, ""),

@@ -261,6 +261,8 @@ def test_cookbook_in_project() -> None:
             rec.get("source_fits") == {"1y": {"T": 1.25, "r2": 0.98}}, str(rec))
     listing = call("videos").get("ok", {}).get("videos", [])
     h.check("videos lists the project as one", "cookbook trial.phystrack (project)" in listing, str(listing))
+    again = call("open", {"video": "cookbook trial.phystrack (project)"})   # The name as listed
+    h.check("open takes a project's name as videos lists it", again.get("ok", {}).get("w") == wid, str(again))
     shown = [row for row in call("windows").get("ok", []) if row["w"] == wid]
     h.check("windows says which project a window is", shown and shown[0].get("project") == "cookbook trial.phystrack",
             str(shown))

@@ -80,6 +80,17 @@ Auto Ruler is in item 2 because it is the ruler's own snap: the logic is the par
   the object samples the object as the background, and the snap fails. Worth a hint in the UI.
 - [ ] Auto Ruler on more footage (only Air Trial 1 frame 0 and synthetic bars so far).
 
+## Axes
+- [x] Auto Axis (new `core/autoaxis.py`) and Undo, in a panel under Place Axis once the axes are
+  placed; the assistant's `axes` tool takes `auto` (and `axis`). It turns the axes by up to 10° so
+  an axis lies along the strongest straight line near it (a tube, a track) and slides the origin
+  onto it (an edge within 3% of the picture's smaller side; between a tube's two walls, their
+  middle). Both axes are tried and the stronger line wins. On synthetic tubes it is within 0.05°
+  and 0.1 px; on Air Trial 1 frame 0 (the glass tube, y axis) it gives -3.8° from three starts.
+- [ ] Auto Axis: an x/y choice in the UI (the button picks the stronger line; the tool can name one).
+- [ ] Auto Axis: a weak line (texture, a faint shelf) still passes the strength check when the axis
+  named has nothing better; only the choice between x and y guards against it now.
+
 ## Ruler length and unit
 - [x] Typed length and unit ("50 cm", "2.5 m"), parsed by `core/units.py`.
 - [x] Scale = real length / picture length; the typed length is kept as the ruler moves or stretches.

@@ -3,7 +3,8 @@ Coordinate axes overlay for the Qt spike. A child of the picture item, so its po
 origin in frame pixels and it follows zoom and pan by itself.
 
 Drag either line to move the axes. Drag the red knob at the end of the x axis, or the green knob at
-the end of the y axis, to rotate them. The lines run across the whole picture (as the Tk app's do);
+the end of the y axis, to rotate them. Auto Axis (snap_to) lines them up with a straight line in the
+picture, with Undo. The lines run across the whole picture (as the Tk app's do);
 the arrow tips, labels and knobs sit at the axes' length. Lines, labels and knobs have a black
 outline so they read on any video. Lines are cosmetic (a fixed width on screen at any zoom).
 """
@@ -51,6 +52,7 @@ class AxesItem(QGraphicsObject):
         # 90 degrees counter-clockwise on screen, so its knob adds 90)
         self.handle = _RotateHandle(self, QPointF(length, 0), X_COLOR, turn=0.0)
         self.y_handle = _RotateHandle(self, QPointF(0, -length), Y_COLOR, turn=90.0)
+        self._before_snap: tuple[QPointF, float] | None = None  # Origin and rotation before Auto Axis
 
     def _reach(self) -> float:
         """Half the length of the lines: far enough to reach any corner of the picture from the origin."""
@@ -103,6 +105,22 @@ class AxesItem(QGraphicsObject):
     def angle(self) -> float:
         """The x axis' angle in degrees, counter-clockwise from the picture's x (physics sense)."""
         return -self.rotation()
+
+    # --- Auto Axis (core.autoaxis, through MainWindow) -------------------------------------------
+    def snap_to(self, origin, rotation: float) -> None:
+        """Moves and turns the axes to the snapped origin and rotation, keeping the old ones for Undo."""
+        self._before_snap = (QPointF(self.pos()), self.rotation())
+        self.setPos(QPointF(float(origin[0]), float(origin[1])))
+        self.setRotation(rotation)
+
+    def can_undo(self) -> bool:
+        return self._before_snap is not None
+
+    def undo_snap(self) -> None:
+        if self._before_snap is not None:
+            (pos, rotation), self._before_snap = self._before_snap, None  # Cleared first: both emit
+            self.setPos(pos)
+            self.setRotation(rotation)
 
     def itemChange(self, change, value):
         if change in (QGraphicsItem.GraphicsItemChange.ItemPositionHasChanged,

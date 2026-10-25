@@ -1,7 +1,7 @@
 """
 The scale ruler: placing it, giving it a real length and unit, dragging its ends and bar with the
 mouse, and Auto Ruler (with Undo) on a clip with a coloured bar. Also the axes' geometry, which the
-measurements rely on.
+measurements rely on, and Auto Axis (with Undo) on a clip with a tilted tube.
 
     ~/.venvs/phystrackx-qt/bin/python tests/test_ruler.py      (PHYSTRACK_QT_SHOW=1 to watch)
 """
@@ -15,7 +15,9 @@ import cv2  # noqa: E402
 import numpy as np  # noqa: E402
 from PySide6.QtCore import QPointF  # noqa: E402
 
+from core.autoaxis import snap_axis  # noqa: E402
 from core.autoruler import snap_ruler  # noqa: E402
+from phystrack_qt.agent import tools  # noqa: E402
 from phystrack_qt.measure import physical  # noqa: E402
 from test_tracking import drag  # noqa: E402  (a real mouse drag, as a user makes)
 
@@ -175,6 +177,101 @@ def test_axis_knobs() -> None:
     w.close()
 
 
+TUBE_TILT = 6.0       # Degrees the tube leans from straight up (its top to the right)
+TUBE_CENTRE = (320.0, 240.0)
+TUBE_HALF_WIDTH = 12.0
+
+
+def _tube_picture(tilt=TUBE_TILT, seed=4) -> np.ndarray:
+    """A pale blue tube leaning `tilt` degrees right of vertical, on a grey wall."""
+    rng = np.random.default_rng(seed)
+    img = np.clip(200 + rng.normal(0, 4, (H, W, 1)), 0, 255).astype(np.uint8).repeat(3, 2)
+    th = math.radians(tilt)
+    up = np.array([math.sin(th), -math.cos(th)])  # Along the tube, upwards
+    across = np.array([-up[1], up[0]])
+    c = np.array(TUBE_CENTRE)
+    corners = [c + a * 600 * up + b * TUBE_HALF_WIDTH * across for a, b in ((-1, -1), (1, -1), (1, 1), (-1, 1))]
+    cv2.fillPoly(img, [np.round(np.array(corners) * 16).astype(np.int32)], (210, 170, 140),
+                 lineType=cv2.LINE_AA, shift=4)
+    return img
+
+
+def _off_tube(point) -> float:
+    """How far a point lies from the tube's middle line, in pixels."""
+    th = math.radians(TUBE_TILT)
+    across = np.array([math.cos(th), math.sin(th)])
+    return abs(float(np.dot(np.asarray(point) - TUBE_CENTRE, across)))
+
+
+def make_tube_clip() -> str:
+    path = os.path.join(h.WORK, "tilted_tube.mp4")
+    if os.path.isfile(path):
+        return path
+    img = _tube_picture()
+    out = cv2.VideoWriter(path, cv2.VideoWriter_fourcc(*"mp4v"), 30, (W, H))
+    for _ in range(10):
+        out.write(img)
+    out.release()
+    return path
+
+
+def test_snap_axis() -> None:
+    """core.autoaxis on still pictures: the axis turns to the tube and slides onto its middle."""
+    img = _tube_picture()
+    # The y axis (rotation r points y along (sin r, -cos r)), so the tube's rotation is its tilt
+    for start, origin in ((0.0, (330, 260)), (12.0, (312, 200)), (-3.0, (320, 300))):
+        (x, y), rot, _ = snap_axis(img, origin, start, "y")
+        h.check(f"Auto Axis turns the y axis from {start}° to the tube's {TUBE_TILT}°",
+                abs(rot - TUBE_TILT) < 0.1, f"{rot:.3f}°")
+        h.check("and slides the origin onto the tube's middle, a little",
+                _off_tube((x, y)) < 0.5 and math.dist(origin, (x, y)) < 15,
+                f"{_off_tube((x, y)):.2f} px off the middle, moved {math.dist(origin, (x, y)):.1f} px")
+    (_, _), rot, _ = snap_axis(img, (330, 260), 360.0, "y")
+    h.check("a turn is the nearest one (no flip to the other end)", abs(rot - (360 + TUBE_TILT)) < 0.1,
+            f"{rot:.3f}°")
+    (_, _), rot, _ = snap_axis(img, (330, 260), TUBE_TILT - 90 + 5, "x")
+    h.check("the x axis lines up with the tube too", abs(rot - (TUBE_TILT - 90)) < 0.1, f"{rot:.3f}°")
+    blank = np.clip(200 + np.random.default_rng(5).normal(0, 4, (H, W, 1)), 0, 255).astype(np.uint8).repeat(3, 2)
+    try:
+        snap_axis(blank, (320, 240), 0.0, "y")
+        h.check("a blank wall has no line to snap to", False, "no error")
+    except ValueError as e:
+        h.check("a blank wall has no line to snap to", "No straight line" in str(e), str(e))
+
+
+def test_auto_axis() -> None:
+    """Auto Axis in the window: its button panel, the turn and slide, Undo, and the assistant's tool."""
+    w = h.window()
+    w.load_video(make_tube_clip())
+    h.check("proxy is made", h.pump(lambda: w.source.has_proxy, 60))
+    h.check("the Auto Axis buttons are hidden until the axes are placed", not w.axes_panel.isVisible())
+    w.start_axis()
+    w._place_axes(QPointF(330, 250))
+    w.axes.setRotation(2.0)
+    h.check("placing the axes shows the Auto Axis buttons, Undo off",
+            w.axes_panel.isVisible() and not w.undo_axis_btn.isEnabled())
+
+    which = w.auto_axis()
+    p = w.axes.pos()
+    h.check("Auto Axis lines the y axis up with the tube (the stronger line)",
+            which == "y" and abs(w.axes.rotation() - TUBE_TILT) < 0.2,
+            f"{which}, {w.axes.rotation():.3f}°")
+    h.check("and slides the origin onto the tube's middle", _off_tube((p.x(), p.y())) < 1.0,
+            f"{_off_tube((p.x(), p.y())):.2f} px")
+    h.check("Undo Auto Axis is available", w.undo_axis_btn.isEnabled())
+    w.undo_auto_axis()
+    p = w.axes.pos()
+    h.check("Undo puts the axes back", abs(p.x() - 330) < 1e-6 and abs(p.y() - 250) < 1e-6
+            and abs(w.axes.rotation() - 2.0) < 1e-9, f"({p.x()}, {p.y()}) {w.axes.rotation()}°")
+    h.check("and Undo is no longer available", not w.undo_axis_btn.isEnabled())
+
+    r = tools.IMPL["axes"](w, rot=-1.0, auto=True, axis="y")
+    h.check("the assistant's axes tool snaps too (auto)",
+            r.get("snapped") == "y" and abs(r["rot"] - TUBE_TILT) < 0.2, str(r))
+    w._dirty = False
+    w.close()
+
+
 if __name__ == "__main__":
     h.app()
     print("test_ruler")
@@ -183,4 +280,8 @@ if __name__ == "__main__":
     test_axis_knobs()
     print("test_auto_ruler_over_tape")
     test_auto_ruler_over_tape()
+    print("test_snap_axis")
+    test_snap_axis()
+    print("test_auto_axis")
+    test_auto_axis()
     h.finish()

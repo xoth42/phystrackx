@@ -18,6 +18,7 @@ agent's).
 
 import math
 import os
+import re
 
 import numpy as np
 from PySide6.QtCore import QPointF, QRectF
@@ -334,6 +335,8 @@ def _find_video(video: str) -> str:
         if os.path.isfile(path):
             return path
         raise ToolError(f"no file {video}")
+    # The name as videos lists it: "trial.phystrack (project)", "trial.mp4 (w2)"
+    video = re.sub(r"\s+\((project|w\d+)\)\s*$", "", video.strip())
     for folder in _folders():
         exact = os.path.join(folder, video)
         if os.path.isfile(exact):
@@ -367,9 +370,20 @@ def tool_open(video: str):
         raise ToolError(f"could not open {video}")
     target = win.wid
     windows.focus(win)
-    return Wait(lambda: win.source.has_proxy,
-                lambda: {"w": win.wid, "frames": win.source.fcount,
-                         "fps": round(win.source.measure_fps, 3), "ev": _ev(win)}, timeout=600)
+    # A video opens as a new, empty project. Its trial's saved work is in its project files: say
+    # so, or a model takes this window as the source and finds no setup to copy
+    stem = os.path.splitext(os.path.basename(path))[0].lower()
+    projects = [] if project else sorted(
+        n for n in os.listdir(os.path.dirname(path))
+        if n.lower().endswith(PROJECT_TYPE) and n.lower().startswith(stem) and not n.startswith("."))
+
+    def done():
+        out = {"w": win.wid, "frames": win.source.fcount,
+               "fps": round(win.source.measure_fps, 3), "ev": _ev(win)}
+        if projects:
+            out["note"] = f"new empty project; this trial's saved work is in {projects}: open that as a source"
+        return out
+    return Wait(lambda: win.source.has_proxy, done, timeout=600)
 
 
 @_tool("revert")
@@ -530,15 +544,33 @@ def tool_ruler(win, p1=None, p2=None, length=None, unit=None, auto=False):
 
 
 @_tool("axes")
-def tool_axes(win, x: float, y: float, rot: float = 0.0):
+def tool_axes(win, x: float | None = None, y: float | None = None, rot: float | None = None,
+              auto: bool = False, axis: str | None = None):
     _video(win)
+    if axis not in (None, "x", "y"):
+        raise ToolError("axis must be x or y")
     if win.axes is None:
+        if x is None or y is None:
+            raise ToolError("no axes yet: give the origin x, y")
         size = win.view.picture.boundingRect()
         win.axes = win._make_axes(0.3 * min(size.width(), size.height()))
-    win.axes.setPos(QPointF(x, y))
-    win.axes.setRotation(rot)
+    if x is not None or y is not None:
+        p = win.axes.pos()
+        win.axes.setPos(QPointF(p.x() if x is None else x, p.y() if y is None else y))
+    if rot is not None:
+        win.axes.setRotation(rot)
     win._touch("axes")
-    return {"x": round(x, 1), "y": round(y, 1), "rot": round(rot, 2), "ev": _ev(win)}
+    out = {}
+    if auto:
+        try:
+            which, origin, rotation = win._find_axis_line(axis)
+        except ValueError as e:
+            raise ToolError(f"auto: {e}") from None
+        win.axes.snap_to(origin, rotation)
+        out["snapped"] = which
+    p = win.axes.pos()
+    return {"x": round(p.x(), 1), "y": round(p.y(), 1), "rot": round(win.axes.rotation(), 2)} \
+        | out | {"ev": _ev(win)}
 
 
 @_tool("mark")
