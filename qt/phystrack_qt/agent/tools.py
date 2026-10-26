@@ -911,6 +911,7 @@ def tool_plots(win, kinds=None, model=None, range=None):
     for kind in list(fits):    # A model given without a range keeps the plot's own range
         if fits[kind].get("range") is None:
             fits[kind].pop("range", None)
+    win._close_stale_plots()   # A plot of data tracked again is redrawn, not reused
     win.show_plots(kinds)      # Applies the settings, and logs the event
 
     def report():
