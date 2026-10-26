@@ -51,6 +51,8 @@ class VideoView(QGraphicsView):
         self.picture = QGraphicsPixmapItem()
         self.picture.setShapeMode(QGraphicsPixmapItem.ShapeMode.BoundingRectShape)
         self.scene().addItem(self.picture)
+        self._current_frame: np.ndarray | None = None
+        self._current_frame_index: int | None = None
         self._fitted = True    # Follows the window's size until the user zooms
         self.tool = TOOL_NONE
         self._box_start: QPointF | None = None
@@ -58,8 +60,10 @@ class VideoView(QGraphicsView):
         self._move_start: QPointF | None = None
 
     # --- Picture ---------------------------------------------------------------------------------
-    def show_frame(self, frame: np.ndarray) -> None:
+    def show_frame(self, frame: np.ndarray, index: int | None = None) -> None:
         """Shows a BGR frame. The first one (or a new size) also fits the view to it."""
+        self._current_frame = np.array(frame, copy=True)
+        self._current_frame_index = index
         h, w = frame.shape[:2]
         image = QImage(frame.data, w, h, frame.strides[0], QImage.Format.Format_BGR888)
         new_size = self.picture.pixmap().size().toTuple() != (w, h)
@@ -67,6 +71,16 @@ class VideoView(QGraphicsView):
         if new_size:
             self.scene().setSceneRect(self.picture.boundingRect())
             self.fit()
+
+    @property
+    def current_frame(self) -> np.ndarray | None:
+        """The BGR pixels most recently handed to the view, independent of its OpenGL viewport."""
+        return self._current_frame
+
+    @property
+    def current_frame_index(self) -> int | None:
+        """The index associated with the pixels most recently handed to the view."""
+        return self._current_frame_index
 
     # --- Zoom and pan ----------------------------------------------------------------------------
     def fit(self) -> None:

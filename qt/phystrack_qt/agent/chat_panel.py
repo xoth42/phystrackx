@@ -9,11 +9,13 @@ come yet, a blinking cursor shows that it is working. Reasoning (a checkbox, the
 dock) shows a thinking model's reasoning, in italics, before each reply.
 """
 
+import base64
 import html
 import json
 import threading
 
-from PySide6.QtCore import QEvent, QObject, Qt, QTimer, Signal
+from PySide6.QtCore import QEvent, QObject, Qt, QTimer, QUrl, Signal
+from PySide6.QtGui import QImage, QTextDocument
 from PySide6.QtWidgets import (QApplication, QCheckBox, QComboBox, QHBoxLayout, QLabel, QLineEdit, QPushButton,
                                QTextBrowser, QVBoxLayout, QWidget)
 
@@ -48,6 +50,7 @@ class ChatPanel(QWidget):
         self.focus_after_send = focus_after_send   # Where the keyboard goes after Send (the picture)
         self._live = ""                            # The reply being written
         self._live_thought = ""                    # Its reasoning, as it is written
+        self._quick_look_images: dict[str, dict[str, QImage]] = {}
 
         layout = QVBoxLayout(self)
         layout.setContentsMargins(4, 4, 4, 4)
@@ -64,6 +67,11 @@ class ChatPanel(QWidget):
         self.reasoning_box.setChecked(session.show_reasoning)
         self.reasoning_box.toggled.connect(session.set_show_reasoning)
         top.addWidget(self.reasoning_box)
+        self.retry_context_box = QCheckBox("Retry on context limit")
+        self.retry_context_box.setToolTip("Retry once with older conversation removed and tool results shortened")
+        self.retry_context_box.setChecked(session.retry_context_limit)
+        self.retry_context_box.toggled.connect(session.set_retry_context_limit)
+        top.addWidget(self.retry_context_box)
         self.state_label = QLabel()
         top.addWidget(self.state_label)
         layout.addLayout(top)
@@ -94,6 +102,7 @@ class ChatPanel(QWidget):
         QApplication.instance().installEventFilter(_ClickAway(self.input, self))
 
         session.event.connect(self._on_event)
+        session.quick_look_ready.connect(self._on_quick_look_ready)
         session.state_changed.connect(self._on_state)
         session.runner.changed.connect(self._on_runner)
         session.view_changed.connect(self._on_view)
@@ -146,6 +155,25 @@ class ChatPanel(QWidget):
                 self._show_options([])
         self._render()
 
+    def _on_quick_look_ready(self, call_id: str, data_urls: dict) -> None:
+        """Decode Quick Look images once per dock; the transcript stores only its short call id."""
+        images = {}
+        for name in ("frame", "selection"):
+            data_url = data_urls.get(name)
+            if not data_url:
+                continue
+            try:
+                encoded = data_url.split(",", 1)[1]
+                image = QImage.fromData(base64.b64decode(encoded, validate=True))
+            except (IndexError, ValueError):
+                continue
+            if not image.isNull():
+                images[name] = image
+        if not images:
+            return
+        self._quick_look_images[call_id] = images
+        self._render()
+
     def _on_state(self, state: str) -> None:
         self._refresh_label()
         self.stop_btn.setText("Start" if state == "stopped" else "Stop")
@@ -162,6 +190,9 @@ class ChatPanel(QWidget):
         self.reasoning_box.blockSignals(True)
         self.reasoning_box.setChecked(self.session.show_reasoning)
         self.reasoning_box.blockSignals(False)
+        self.retry_context_box.blockSignals(True)
+        self.retry_context_box.setChecked(self.session.retry_context_limit)
+        self.retry_context_box.blockSignals(False)
         self._render()
 
     def _on_runner(self, status: str, detail: str) -> None:
@@ -206,6 +237,23 @@ class ChatPanel(QWidget):
                 continue
             if kind == "ask":
                 text = json.loads(text).get("q", "")
+            if kind == "quick_look_image":
+                images = self._quick_look_images.get(text, {})
+                for name, label in (("frame", "Video crop"), ("selection", "Selection shape only")):
+                    image = images.get(name)
+                    if image is None:
+                        continue
+                    resource = QUrl(f"quicklook:{text}/{name}")
+                    self.view.document().addResource(QTextDocument.ResourceType.ImageResource,
+                                                     resource, image)
+                    width = min(image.width(), max(120, self.view.viewport().width() - 28))
+                    height = max(1, round(image.height() * width / image.width()))
+                    background = "background-color:#555;" if name == "selection" else ""
+                    rows.append(f'<p style="margin: 4px 0 2px 16px;"><b>{label}</b></p>'
+                                f'<p style="margin: 0 0 8px 16px;{background}">'
+                                f'<img src="{html.escape(resource.toString(), quote=True)}" '
+                                f'width="{width}" height="{height}"></p>')
+                continue
             body = html.escape(text).replace("\n", "<br>")
             prefix = {"user": "<b>You:</b> ", "assistant": "", "tool": "▸ ", "result": "&nbsp;&nbsp;",
                       "ask": "<b>?</b> ", "status": "", "error": "<b>!</b> "}.get(kind, "")

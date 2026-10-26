@@ -758,7 +758,7 @@ class MainWindow(QMainWindow):
         t0 = time.perf_counter()
         frame = self.source.frame(index)
         t1 = time.perf_counter()
-        self.view.show_frame(frame)
+        self.view.show_frame(frame, index)
         t2 = time.perf_counter()
         for obj in self.objects:
             obj.show_frame(index)
@@ -1281,7 +1281,7 @@ class MainWindow(QMainWindow):
 
     def _on_shown(self, index: int, frame) -> None:
         """A frame from the tracker's own reader, drawn as it is: no decoding on this thread."""
-        self.view.show_frame(frame)
+        self.view.show_frame(frame, index)
         for obj in self.objects:
             obj.show_frame(index)
         self.seek.blockSignals(True)  # Moves the bar without seeking again

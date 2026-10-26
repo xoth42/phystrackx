@@ -111,6 +111,24 @@ def test_tools() -> None:
     pad = RADIUS + 6
     r = call("mark", {"box": [x0 - pad, y0 - pad, 2 * pad, 2 * pad], "frame": 5})
     h.check("mark", r.get("ok", {}).get("n") == 1 and r["ok"]["frame"] == 5, str(r))
+    corrected_box = [x0 - pad + 1, y0 - pad + 1, 2 * pad, 2 * pad]
+    r = call("set_object_selection", {"n": 1, "box": corrected_box, "frame": 5})
+    h.check("the agent can select and correct an object's tracking box",
+            r.get("ok", {}).get("selected") == 1 and r["ok"].get("marked_frame") == 5 and
+            all(abs(a - b) < 1e-6 for a, b in zip(r["ok"].get("box", []), corrected_box)), str(r))
+    h.check("corrected selection is marked for retracking",
+            src.objects[0].changed and src._selected_object() is src.objects[0], str(r))
+    r = call("quick_look", {"n": 1, "frame": 5})
+    quick = r.get("ok", {})
+    h.check("quick_look returns an image crop and selection metadata",
+            quick.get("selection_source") == "marked at frame 5" and
+            quick.get("image", "").startswith("data:image/jpeg;base64,") and
+            "selection_image" not in quick and quick.get("width", 0) < src.source.size[0], str(r)[:300])
+    r = call("quick_look", {"n": 1, "frame": 5, "selection": True})
+    quick_pair = r.get("ok", {})
+    h.check("quick_look selection comparison has a separate transparent PNG mask",
+            quick_pair.get("image", "").startswith("data:image/jpeg;base64,") and
+            quick_pair.get("selection_image", "").startswith("data:image/png;base64,"), str(r)[:300])
     r = call("mark", {"box": [1, 2, 3]})
     h.check("a bad argument says what is expected", "box must be box [x, y, w, h]" in r.get("error", ""),
             str(r))

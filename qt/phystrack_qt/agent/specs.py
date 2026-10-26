@@ -33,6 +33,15 @@ SPECS = {
     "data": ("An object's measured curve, thinned to about `points` points: [[t s, value], ...] "
              "(kind: x y r; default r and the first object). To see where a drop or a disturbance is.",
              {"n": "int?", "kind": "str?", "points": "int?"}, "r"),
+    "get_video_frame": ("See a video frame as an image. Omit frame for the frame currently shown; "
+                        "otherwise frame is a zero-based frame index (nearest integer; out-of-range "
+                        "values clamp to the nearest available frame). Omit region for the whole frame, "
+                        "or give [x, y, width, height] in frame pixels for a crop; partial crops are clipped.",
+                        {"frame": "num?", "region": "box?"}, "r"),
+    "quick_look": ("Return an unmarked small image crop around object n on frame (default: shown). "
+                   "Set selection=true to also return its selection geometry as a separate transparent "
+                   "PNG mask; this is the selection shape, not an image segmentation of the object.",
+                   {"n": "int", "frame": "int?", "selection": "bool?"}, "r"),
     "resume": ("After the user stopped you (Space): lets you go on. Returns what they changed.", {}, "r"),
     "open": ("Open a video (name from videos, or a path) in a new window, shown to the user; it "
              "becomes your current window. A project file opens that trial's setup and saves, to use "
@@ -55,6 +64,10 @@ SPECS = {
              {"x": "num?", "y": "num?", "rot": "num?", "auto": "bool?", "axis": "str?"}, ""),
     "mark": ("Mark an object to track: box on frame (default: the frame shown); auto fits its outline.",
              {"box": "box", "frame": "int?", "circle": "bool?", "auto": "bool?"}, ""),
+    "set_object_selection": ("Select object n in the Objects list. Optionally set its selection box "
+                              "[x, y, width, height] in frame pixels on frame (default: the frame shown); "
+                              "then call track to track again from the corrected selection.",
+                              {"n": "int", "box": "box?", "frame": "int?"}, ""),
     "remove": ("Remove object n.", {"n": "int"}, ""),
     "seek": ("Show frame n.", {"n": "int"}, ""),
     "track": ("Track every object from its marked frame to the trim's end; waits. method: "
@@ -108,6 +121,16 @@ def check_args(name: str, args: dict) -> dict:
     of the wrong type, raises ValueError with a message that says what is expected."""
     if name not in SPECS:
         raise ValueError(f"no tool {name!r}; tools: {', '.join(SPECS)}")
+    args = dict(args or {})
+    if name == "get_video_frame":
+        for alias in ("frame_index", "frame_number", "index"):
+            if alias in args and "frame" not in args:
+                args["frame"] = args.pop(alias)
+        for alias in ("crop", "box", "rect"):
+            if alias in args and "region" not in args:
+                args["region"] = args.pop(alias)
+        if "region" not in args and all(key in args for key in ("x", "y", "width", "height")):
+            args["region"] = [args.pop("x"), args.pop("y"), args.pop("width"), args.pop("height")]
     params = SPECS[name][1]
     out = {}
     for key, value in (args or {}).items():
@@ -146,6 +169,8 @@ def _convert(tool: str, key: str, kind: str, value):
             return bool(value)
         if kind in ("pt", "box"):
             n = 2 if kind == "pt" else 4
+            if kind == "box" and isinstance(value, dict):
+                value = [value.get(k) for k in ("x", "y", "width", "height")]
             if isinstance(value, str):
                 value = [v for v in value.replace("[", " ").replace("]", " ").replace(",", " ").split()]
             if len(value) != n:

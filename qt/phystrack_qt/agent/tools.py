@@ -16,10 +16,12 @@ window for the whole call (a user edit in that window during a long agent call c
 agent's).
 """
 
+import base64
 import math
 import os
 import re
 
+import cv2
 import numpy as np
 from PySide6.QtCore import QPointF, QRectF
 
@@ -322,6 +324,131 @@ def tool_data(win, n=None, kind="r", points=40):
             "points": [[round(float(t[i]), 3), round(float(values[i]), 2)] for i in picked]}
 
 
+@_tool("get_video_frame")
+def tool_get_video_frame(win, frame=None, region=None):
+    _video(win)
+    if win.source.reader is None:
+        raise ToolError("the video is still loading")
+    corrections = []
+    index = (win.view.current_frame_index if win.view.current_frame_index is not None else win.seek.value()) \
+        if frame is None else int(round(frame))
+    if frame is not None and frame != index:
+        corrections.append(f"rounded frame {frame} to {index}")
+    if index < 0 and index >= -win.source.fcount:
+        index += win.source.fcount
+        corrections.append(f"interpreted negative frame as {index} from the end")
+    bounded_index = min(max(index, 0), win.source.fcount - 1)
+    if bounded_index != index:
+        corrections.append(f"clamped frame {index} to {bounded_index}")
+    index = bounded_index
+    image = win.view.current_frame if frame is None else None
+    if image is None:
+        image = win.source.frame(index)
+    height, width = image.shape[:2]
+    crop = None
+    if region is not None:
+        if any(abs(value - round(value)) > 1e-6 for value in region):
+            corrections.append("rounded crop coordinates and dimensions to whole pixels")
+        x, y, crop_width, crop_height = (int(round(value)) for value in region)
+        if crop_width < 0:
+            x, crop_width = x + crop_width, -crop_width
+            corrections.append("normalized negative crop width")
+        if crop_height < 0:
+            y, crop_height = y + crop_height, -crop_height
+            corrections.append("normalized negative crop height")
+        if crop_width == 0 or crop_height == 0:
+            raise ToolError("crop width and height must be nonzero; use region=[x, y, width, height]")
+        x0, y0 = max(0, x), max(0, y)
+        x1, y1 = min(width, x + crop_width), min(height, y + crop_height)
+        if x0 >= x1 or y0 >= y1:
+            raise ToolError(f"crop {region} does not overlap the {width} x {height} frame; "
+                            "use region=[x, y, width, height] in frame pixels")
+        if (x0, y0, x1, y1) != (x, y, x + crop_width, y + crop_height):
+            corrections.append(f"clipped crop to frame bounds: {[x0, y0, x1 - x0, y1 - y0]}")
+        image = image[y0:y1, x0:x1]
+        crop = [x0, y0, x1 - x0, y1 - y0]
+    ok, encoded = cv2.imencode(".jpg", image, [cv2.IMWRITE_JPEG_QUALITY, 85])
+    if not ok:
+        raise ToolError("could not encode the frame as JPEG")
+    data_url = "data:image/jpeg;base64," + base64.b64encode(encoded).decode("ascii")
+    return {"frame": index, "width": image.shape[1], "height": image.shape[0],
+            "frame_width": width, "frame_height": height,
+            "region": crop, "mime_type": "image/jpeg", "image": data_url,
+            **({"corrected": corrections} if corrections else {})}
+
+
+@_tool("quick_look")
+def tool_quick_look(win, n: int, frame=None, selection=False):
+    _video(win)
+    obj = next((candidate for candidate in win.objects if candidate.number == n), None)
+    if obj is None:
+        raise ToolError(f"no object {n}; objects: {[candidate.number for candidate in win.objects] or 'none'}; "
+                        "call state for object numbers")
+    if win.source.reader is None:
+        raise ToolError("the video is still loading")
+    index = (win.view.current_frame_index if win.view.current_frame_index is not None else win.seek.value()) \
+        if frame is None else frame
+    if not 0 <= index < win.source.fcount:
+        raise ToolError(f"frame must be 0..{win.source.fcount - 1}")
+    selection_source = "tracked"
+    if obj.boxes:
+        if index not in obj.boxes:
+            if index != obj.marked_frame:
+                raise ToolError(f"object {n} has no tracked selection at frame {index}; tracked frames are "
+                                f"{min(obj.boxes)}..{max(obj.boxes)}. Use a tracked frame or its marked frame "
+                                "and set_object_selection")
+            box = obj.marked
+            selection_source = f"marked at frame {obj.marked_frame}"
+        else:
+            box = obj.boxes[index]
+            if box is None:
+                raise ToolError(f"object {n} was lost at frame {index}; try a nearby tracked frame, then "
+                                "correct the selection with set_object_selection")
+    else:
+        box = obj.marked
+        selection_source = f"marked at frame {obj.marked_frame}"
+
+    image = win.source.frame(index)
+    frame_height, frame_width = image.shape[:2]
+    x, y, width, height = box
+    padding = max(20, int(round(max(width, height) * 0.75)), (96 - int(max(width, height))) // 2)
+    x0 = max(0, int(math.floor(x - padding)))
+    y0 = max(0, int(math.floor(y - padding)))
+    x1 = min(frame_width, int(math.ceil(x + width + padding)))
+    y1 = min(frame_height, int(math.ceil(y + height + padding)))
+    if x0 >= x1 or y0 >= y1:
+        raise ToolError(f"object {n}'s selection {list(box)} is outside the {frame_width} x {frame_height} frame")
+    crop = image[y0:y1, x0:x1].copy()
+    left, top = max(0, int(round(x - x0))), max(0, int(round(y - y0)))
+    right, bottom = min(crop.shape[1] - 1, int(round(x + width - x0))), \
+        min(crop.shape[0] - 1, int(round(y + height - y0)))
+    ok, encoded = cv2.imencode(".jpg", crop, [cv2.IMWRITE_JPEG_QUALITY, 85])
+    if not ok:
+        raise ToolError("could not encode Quick Look as JPEG")
+    data_url = "data:image/jpeg;base64," + base64.b64encode(encoded).decode("ascii")
+    result = {"object": n, "frame": index, "selection_box": _r(list(box)),
+              "selection_source": selection_source, "region": [x0, y0, x1 - x0, y1 - y0],
+              "width": crop.shape[1], "height": crop.shape[0],
+              "mime_type": "image/jpeg", "image": data_url}
+    if selection:
+        mask = np.zeros((crop.shape[0], crop.shape[1], 4), dtype=np.uint8)
+        if obj.outline:
+            points = np.array([[round(x + u * width - x0), round(y + v * height - y0)]
+                               for u, v in obj.outline], dtype=np.int32)
+            cv2.fillPoly(mask, [points], (255, 255, 255, 255), cv2.LINE_AA)
+        elif obj.circle:
+            cv2.ellipse(mask, ((left + right) // 2, (top + bottom) // 2),
+                        (max(1, (right - left) // 2), max(1, (bottom - top) // 2)), 0, 0, 360,
+                        (255, 255, 255, 255), -1, cv2.LINE_AA)
+        else:
+            cv2.rectangle(mask, (left, top), (right, bottom), (255, 255, 255, 255), -1, cv2.LINE_AA)
+        ok, mask_encoded = cv2.imencode(".png", mask)
+        if not ok:
+            raise ToolError("could not encode selection-only Quick Look as PNG")
+        result["selection_image"] = "data:image/png;base64," + base64.b64encode(mask_encoded).decode("ascii")
+    return result
+
+
 @_tool("resume")
 def tool_resume():
     changes = windows.AGENT.resume()
@@ -601,6 +728,48 @@ def tool_mark(win, box, frame=None, circle=False, auto=False):
     win._touch("mark", {"n": obj.number})
     win._show(f)
     return {"n": obj.number, "box": _r([x, y, w, h]), "frame": f, "ev": _ev(win)}
+
+
+@_tool("set_object_selection")
+def tool_set_object_selection(win, n: int, box=None, frame=None):
+    _video(win)
+    if win.job is not None:
+        raise ToolError("tracking is in progress; wait for it to end before changing a selection")
+    obj = next((candidate for candidate in win.objects if candidate.number == n), None)
+    if obj is None:
+        raise ToolError(f"no object {n}; objects: {[candidate.number for candidate in win.objects] or 'none'}; "
+                        "call state to see object numbers")
+    if box is not None:
+        x, y, width, height = box
+        frame_width, frame_height = win.view.picture.pixmap().size().toTuple()
+        if width < 3 or height < 3 or x < 0 or y < 0 or x + width > frame_width or y + height > frame_height:
+            raise ToolError(f"box must be inside the picture ({frame_width} x {frame_height}) and at least "
+                            "3 px wide and high; use [x, y, width, height]")
+    frame_index = frame
+    if box is not None or frame is not None:
+        if frame_index is None:
+            frame_index = win.view.current_frame_index
+        if frame_index is None:
+            frame_index = win.seek.value()
+        if not 0 <= frame_index < win.source.fcount:
+            raise ToolError(f"frame must be 0..{win.source.fcount - 1}")
+        _seek(win, frame_index)
+    win.object_list.setCurrentRow(win.objects.index(obj))
+    if box is not None:
+        rect = QRectF(x, y, width, height)
+        obj.rect.setRect(rect)
+        if not obj.boxes:
+            obj.marked_frame = frame_index
+        win._object_dragged(obj, rect)
+        win._refresh_objects(select=obj)
+    rect = obj.rect.rect()
+    out = {"selected": n, "frame": frame_index if frame_index is not None else win.seek.value(),
+           "box": _r([rect.x(), rect.y(), rect.width(), rect.height()]),
+           "marked_frame": obj.marked_frame, "restart_frame": obj.restart_frame,
+           "changed": obj.changed}
+    if box is not None:
+        out["ev"] = _ev(win)
+    return out
 
 
 @_tool("remove")

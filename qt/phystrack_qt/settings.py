@@ -18,6 +18,7 @@ logger = logging.getLogger(__name__)
 DEFAULTS = {
     "show_reasoning": False,   # The assistant docks show a thinking model's reasoning
     "max_tokens": 400,         # The longest reply the assistant's model may write, reasoning included
+    "retry_context_limit": True,  # Retry once with a compact current-request prompt on input overflow
 }
 MAX_TOKENS_RANGE = (100, 32768)
 

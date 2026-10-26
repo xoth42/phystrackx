@@ -6,15 +6,19 @@ Space stops it while it thinks, and Start tells the model what the user changed 
     ~/.venvs/phystrackx-qt/bin/python tests/test_assistant.py      (PHYSTRACK_QT_SHOW=1 to watch)
 """
 
+import base64
 import json
 import time
+
+import cv2
+import numpy as np
 
 import harness as h  # noqa: F401  (sets up Qt before PySide6 is imported)
 
 from phystrack_qt import windows  # noqa: E402
 from phystrack_qt.agent.chat_panel import ChatPanel  # noqa: E402
-from phystrack_qt.agent.llm import Cancelled, _ThinkTags  # noqa: E402
-from phystrack_qt.agent.session import AgentSession  # noqa: E402
+from phystrack_qt.agent.llm import Cancelled, LLMError, _ThinkTags  # noqa: E402
+from phystrack_qt.agent.session import AgentSession, is_context_limit_error  # noqa: E402
 from test_tracking import make_clip  # noqa: E402
 
 
@@ -23,7 +27,7 @@ class ScriptedModel:
     (messages, on_text, cancelled) -> reply (to look at what it was sent, or to be slow)."""
 
     def __init__(self, turns: list) -> None:
-        self.turns, self.sent, self.max_tokens = list(turns), [], []
+        self.turns, self.sent, self.sent_tools, self.max_tokens = list(turns), [], [], []
         self.url, self.model, self.is_ollama = "scripted", "scripted", False
 
     def models(self) -> list:
@@ -31,6 +35,7 @@ class ScriptedModel:
 
     def chat(self, messages, tools, on_text=None, cancelled=None, max_tokens=400, on_reasoning=None) -> dict:
         self.sent.append(messages)
+        self.sent_tools.append(tools)
         self.max_tokens.append(max_tokens)
         turn = self.turns.pop(0)
         if callable(turn):
@@ -67,6 +72,95 @@ def test_assistant() -> None:
     text = panel.view.toPlainText()
     h.check("the dock shows the request, the tool call and the answer",
             "Which windows" in text and "windows()" in text and f"One window is open: {w.wid}" in text, text[-300:])
+
+    def inspect_frame(messages, on_text, cancelled):
+        frame_message = next((m for m in messages if m["role"] == "user" and
+                              isinstance(m["content"], list)), None)
+        inspect_frame.message = frame_message
+        return {"content": "I can inspect this frame.", "tool_calls": []}
+
+    model.turns = [{"calls": [("get_video_frame", {"frame": 0, "region": [10, 12, 32, 24]})]},
+                   inspect_frame]
+    session.send("Look at a crop of frame zero")
+    h.check("the frame tool turn ends", h.pump(lambda: session.state == "idle" and not model.turns, 30))
+    image_message = getattr(inspect_frame, "message", None)
+    h.check("the assistant receives the returned frame as image content",
+            image_message is not None and image_message["content"][1]["type"] == "image_url" and
+            image_message["content"][1]["image_url"]["url"].startswith("data:image/jpeg;base64,"),
+            str(image_message)[:200])
+    frame_tool_result = next(m for m in reversed(session.messages) if m["role"] == "tool" and
+                             '"width":32' in m["content"])
+    h.check("the tool reply carries crop dimensions without duplicating image bytes",
+            "base64" not in frame_tool_result["content"], frame_tool_result["content"][:200])
+    h.check("frame image context is discarded after the assistant answers",
+            not any(m.get("_frame_image") for m in session.messages))
+
+    ok, preview = cv2.imencode(".jpg", np.zeros((12, 18, 3), dtype=np.uint8))
+    h.check("test Quick Look image encodes", ok)
+    preview_id = "quick-look-preview-test"
+    session.quick_look_ready.emit(preview_id, {"frame": "data:image/jpeg;base64," +
+                                               base64.b64encode(preview).decode("ascii")})
+    session._emit("quick_look_image", preview_id)
+    result_text = "".join(text for kind, text in session.transcript if kind == "result")
+    h.check("Quick Look renders inline in chat while the turn is active",
+            "<img" in panel.view.toHtml() and f"quicklook:{preview_id}/frame" in panel.view.toHtml() and
+            preview_id not in result_text,
+            panel.view.toHtml()[-500:])
+
+    prior_messages, prior_start = session.messages, session._request_start
+    session.messages = [
+        {"role": "user", "content": "Inspect and track the ball"},
+        {"role": "user", "_frame_image": True, "content": [
+            {"type": "text", "text": "Quick Look selection"},
+            {"type": "image_url", "image_url": {"url": "data:image/jpeg;base64,AA=="}},
+        ]},
+        {"role": "tool", "tool_call_id": "old-tool", "content": "large result"},
+    ]
+    session._request_start = 0
+    first_compact = session._context(compact=True, compact_level=1)
+    smaller_compact = session._context(compact=True, compact_level=2)
+    h.check("progressive compacting drops prior image payloads",
+            any(part.get("type") == "image_url" for part in first_compact[1]["content"]) and
+            not any(part.get("type") == "image_url" for part in smaller_compact[1]["content"]))
+    session.messages, session._request_start = prior_messages, prior_start
+
+    def context_retry(messages, on_text, cancelled):
+        context_retry.messages = messages
+        return {"content": "The original request is complete.", "reasoning": "", "tool_calls": [
+            {"id": "end-reprompts", "name": "end_reprompts", "arguments": {}}]}
+
+    original_chat = model.chat
+    attempts = []
+
+    def reject_once(messages, tools, **kwargs):
+        attempts.append((messages, tools))
+        if len(attempts) < 3:
+            raise LLMError("400: prompt tokens exceed the model context length")
+        return original_chat(messages, tools, **kwargs)
+
+    model.chat = reject_once
+    model.turns = [context_retry]
+    # Two context failures should compact progressively, then end only when the model calls the tool.
+    session.send("Trigger the context retry")
+    retried = h.pump(lambda: session.state == "idle" and not model.turns, 30)
+    model.chat = original_chat
+    h.check("the retry re-prompts with a compact current request",
+            retried and len(attempts) == 3 and len(context_retry.messages) == 2 and
+            "Trigger the context retry" in context_retry.messages[1]["content"][0]["text"],
+            str(getattr(context_retry, "messages", None)))
+    h.check("end_reprompts remains available through repeated overflow retries",
+            all(any(tool["function"]["name"] == "end_reprompts" for tool in tools)
+                for _, tools in attempts[1:]))
+    h.check("end_reprompts terminates without another model turn",
+            retried and model.sent[-1] is context_retry.messages and
+            any(m.get("tool_call_id") == "end-reprompts" and m["content"] == "{\"ended\":true}"
+            for m in session.messages[-3:]) and
+            any(kind == "status" and "re-prompting ended" in text for kind, text in session.transcript[-8:]))
+    h.check("the context retry is reported in chat status",
+            any(kind == "status" and "retrying" in text for kind, text in session.transcript[-8:]))
+    h.check("common context overflow messages are recognized",
+            is_context_limit_error(LLMError("maximum input length exceeded")) and
+            not is_context_limit_error(LLMError("connection refused")))
 
     # A question: the session waits for the answer, which goes back to the model
     def check_answer(messages, on_text, cancelled):

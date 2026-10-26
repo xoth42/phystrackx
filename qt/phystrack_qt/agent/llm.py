@@ -114,8 +114,14 @@ class LLM:
         try:
             response = self._open("/chat/completions", body, timeout=600.0)
         except urllib.error.HTTPError as e:
-            raise LLMError(f"the model runner refused the request ({e.code}): "
-                           f"{e.read()[:300].decode('utf-8', 'replace')}") from None
+            detail = e.read()[:300].decode("utf-8", "replace")
+            has_image = any(isinstance(m.get("content"), list) and any(
+                part.get("type") == "image_url" for part in m["content"] if isinstance(part, dict))
+                for m in messages)
+            if has_image:
+                detail += "; this request includes an image, so use a vision-capable model and a runner " \
+                          "that supports OpenAI-compatible image_url content"
+            raise LLMError(f"the model runner refused the request ({e.code}): {detail}") from None
         except OSError as e:
             raise LLMError(f"cannot reach the model runner at {self.url} ({e})") from None
         content, reasoning, calls, tags = [], [], {}, _ThinkTags()
