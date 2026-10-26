@@ -224,10 +224,44 @@ def test_data_first_then_fits_made_ahead() -> None:
     window.close()
 
 
+def test_a_copied_fit_range_is_put_on_the_open_plots_drop() -> None:
+    """A fit range copied from another trial ("from_low", counted from the end of that trial's initial drop) is put on
+    this trial's own drop once its plot is open. With no plot open it waits (and loads nothing to look for one:
+    opening a project must not load the plot libraries, test_startup.py)."""
+    t = np.linspace(0, 6, 301)
+    r = 30 + 25 * np.exp(-0.3 * t) * np.cos(2 * math.pi * t / 3)   # High at the start, its first low at 1.43 s
+    w = h.window()
+    window = open_plots(1, t, np.column_stack([r, np.zeros_like(r)]), "cm", ["r"])[0]
+    _fitted(window)
+    w._plot_windows.append(window)
+    model = window.fit_panel.model
+    w.plots = {"kinds": ["r"], "fits": {"r": {"model": model, "from_low": [0.0, 2.0]}}}
+    w._apply_plot_settings()
+    fit = w.plots["fits"]["r"]
+    low = 1.432
+    h.check("the copied range is resolved: it counts from the plot's own low",
+            "from_low" not in fit and abs(fit["range"][0] - low) < 0.05 and abs(fit["range"][1] - (low + 2.0)) < 0.05,
+            str(fit))
+    h.check("...and the plot's fit range follows it",
+            abs(window.fit_panel.range[0] - fit["range"][0]) < 1e-6 and abs(window.fit_panel.range[1] - fit["range"][1]) < 1e-6,
+            str(window.fit_panel.range))
+
+    waiting = h.window()
+    waiting.plots = {"fits": {"r": {"model": model, "from_low": [0.0, 2.0]}}}
+    waiting._apply_plot_settings()
+    h.check("with no plot open, the copied range waits for one", waiting.plots["fits"]["r"].get("from_low") == [0.0, 2.0],
+            str(waiting.plots))
+    window.close()
+    for main in (w, waiting):
+        main._dirty = False
+        main.close()
+
+
 if __name__ == "__main__":
     h.app()
     for test in (test_plots, test_plots_without_units, test_model_table,
-                 test_drag_fit_keeps_the_app_usable, test_data_first_then_fits_made_ahead):
+                 test_drag_fit_keeps_the_app_usable, test_data_first_then_fits_made_ahead,
+                 test_a_copied_fit_range_is_put_on_the_open_plots_drop):
         print(test.__name__)
         test()
     h.finish()

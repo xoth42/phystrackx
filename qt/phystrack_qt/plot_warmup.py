@@ -8,17 +8,41 @@ equation, so the caches are filled.
 Only thread-safe work is done here: plain imports and an off-screen (Agg) figure, never a Qt widget.
 The Qt side of matplotlib (backend_qtagg) is imported on the UI thread when a plot opens; that part
 is quick.
+
+The warm-up is seconds of Python, and Python runs one thread at a time: beside it, the UI thread gets
+about half the turns. At the app's start the restored trials are opened on the UI thread, and took
+0.85 s instead of 0.5 s with the warm-up running; so the start holds it until the last trial is open.
 """
 
 import threading
 
 _started = False
+_held = False     # start() is kept from starting the warm-up until release()
+_wanted = False   # start() was called while it was held
+
+
+def hold() -> None:
+    """Keeps the warm-up from starting until release() (start() then only notes that it was called)."""
+    global _held
+    _held = True
+
+
+def release() -> None:
+    """Lets the warm-up start: at once, if start() was called while it was held."""
+    global _held, _wanted
+    _held = False
+    if _wanted:
+        _wanted = False
+        start()
 
 
 def start() -> None:
-    """Starts the warm-up once (later calls do nothing)."""
-    global _started
+    """Starts the warm-up once (later calls do nothing), unless it is held."""
+    global _started, _wanted
     if _started:
+        return
+    if _held:
+        _wanted = True
         return
     _started = True
     # Not a daemon: a daemon still importing when the app exits can abort the process as the interpreter

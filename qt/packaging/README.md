@@ -36,7 +36,10 @@ when `APPIMAGETOOL` points at the appimagetool). The Windows installer needs Inn
 - `packaging/entitlements.plist`: the two hardened-runtime exceptions a bundled Python needs. Nothing else.
 - `build.py icons`: makes `icon.icns` from `assets/logos/logo.png` (macOS) and the Linux PNG. Windows uses `assets/icon.ico`.
 - `.github/workflows/qt-ci.yml` (repo root): on every change, installs the command on Windows, macOS
-  and Linux, checks it runs, and runs the tests.
+  and Linux, checks it runs, and runs the tests. Then it measures the app's speed on each OS
+  (`qt/tests/perf_report.py`: start, opening a video or a project, scrubbing, tracking, the plots'
+  libraries): a table on the run's summary page, and the numbers kept as an artifact (`perf-<OS>`, 90
+  days). Informational: a slow number never fails the build. Locally: `uv run python tests/perf_report.py`.
 - `.github/workflows/qt-release.yml` (repo root): on a tag `qt-v<version>`, builds on all three, signs
   where the secrets are set, and attaches the packages to a GitHub release.
 
@@ -137,11 +140,15 @@ AppImages need no signing to run. GPG-signing the release files is optional (not
 - **macOS builds are for the Mac's own chip.** CI's `macos-latest` is Apple silicon, so its package
   is arm64 only. A universal build (both chips) is a later step.
 - **Start-up time.** `packaging/entry.py` keeps matplotlib's font cache in the user's cache folder
-  (PyInstaller's hook would rebuild it at every start: about 10 s with the window frozen). The install's
-  hidden launch builds it, so a first start after `install.sh` is as fast as later ones; a `.dmg`
-  drag-install builds it at its first start, once. What is left: the first trial of a start freezes the
-  window about 3.5 s on the Intel MacBook Pro, 2.6 s of it importing scipy (`open_trials` in `app.py`
-  says how to avoid that).
+  (PyInstaller's hook would rebuild it at every start: about 10 s). The install's hidden launch builds it,
+  so a first start after `install.sh` is as fast as later ones; a `.dmg` drag-install builds it at its
+  first start, once, in the background. Opening a project loads neither matplotlib nor scipy (2.4 s, in
+  the first trial): a thread loads them once the last restored trial is open (`plot_warmup.py`). On the
+  Intel MacBook Pro, restoring two projects: the trials start to open 1.7 s after the click (Python, Qt
+  and the window: the floor for this design) and are all open 0.9 s later; the window freezes for no more
+  than 0.5 s at a time (it froze 3.3 s). What is left: each trial opens on the UI thread, about 0.2 s plus
+  its first paint (`open_trials` in `app.py` says how to avoid that); a restore of many tabs takes that
+  long for each, unless the tabs behind the front one are opened only when they are shown.
 - **Size.** The app is about 470 MB, most of it Qt. Trimming the unused Qt modules is a later step.
   ffmpeg is currently bundled twice (in `Frameworks` and `Resources`).
 - **Windows installer, not yet run.** The release workflow builds and signs `PhysTrackX-Setup.exe`, but it

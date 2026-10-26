@@ -81,6 +81,7 @@ class MainWindow(QMainWindow):
         self.ruler: RulerItem | None = None
         self.trim = None            # (start, end) frames once a trim is applied
         self._pending_frame = None  # Latest frame asked for by the seek bar, drawn once per batch
+        self._loading = False       # A video is being opened (load_video): its proxy may be ready at once
         self.objects: list[TrackedObject] = []
         self.job: TrackJob | None = None
         self.track_method = DEFAULT_METHOD     # The method Track last ran with (offered first next time)
@@ -374,7 +375,12 @@ class MainWindow(QMainWindow):
         """Shows the video at once; scrubbing gets faster when the proxy is ready. A new video
         starts a new, unsaved project."""
         t0 = time.perf_counter()
-        if not self.source.load(path):
+        self._loading = True   # A proxy that is there already is ready at once, inside load: nothing to redraw yet
+        try:
+            loaded = self.source.load(path)
+        finally:
+            self._loading = False
+        if not loaded:
             return False
         self.project_path = None
         self._on_opened()
@@ -406,7 +412,8 @@ class MainWindow(QMainWindow):
         if hasattr(self, "_proxy_since"):
             took = time.perf_counter() - self._proxy_since
             self.statusBar().showMessage(f"Fast scrubbing ready ({took:.1f} s)")
-        self._show(self.seek.value())  # Same frame, now from the proxy
+        if not self._loading:
+            self._show(self.seek.value())  # Same frame, now from the proxy
 
     def _on_opened(self) -> None:
         self._pause()
@@ -423,7 +430,7 @@ class MainWindow(QMainWindow):
         self.seek.setEnabled(True)
         for button in self.video_buttons:
             button.setEnabled(True)
-        self._show(0)
+        self._show(0)   # (Also what a project's boxes are fitted to: the size of the picture, see _fit_state)
 
     def _clear_setup(self) -> None:
         """Removes the objects, axes, ruler and trim (a new video, or a revert that puts others back)."""
@@ -698,11 +705,18 @@ class MainWindow(QMainWindow):
         self.plots = copy.deepcopy(state.get("plots") or {})
         self._apply_plot_settings()
         trim = state.get("trim")
-        if trim:
-            self.trim = (int(trim[0]), int(trim[1]))
-            self.seek.setRange(*self.trim)
-        self.seek.setValue(min(max(int(state.get("frame", 0)), self.seek.minimum()),
-                               self.seek.maximum()))
+        # The frame is drawn once, at the end: not again, on the next turn, for the seek bar's signal (each
+        # draw is a decode and an upload, about 25 ms)
+        self.seek.blockSignals(True)
+        try:
+            if trim:
+                self.trim = (int(trim[0]), int(trim[1]))
+                self.seek.setRange(*self.trim)
+            self.seek.setValue(min(max(int(state.get("frame", 0)), self.seek.minimum()),
+                                   self.seek.maximum()))
+        finally:
+            self.seek.blockSignals(False)
+        self._pending_frame = None   # A draw already asked for (a drag just before) would show an older frame
         ax = state.get("axes")
         if ax:
             self.axes = self._make_axes(ax["length"])
@@ -1414,12 +1428,14 @@ class MainWindow(QMainWindow):
         sets the model and range of open plots but does not redraw their data."""
         self._applying_plots = True
         try:
-            from .analysis import drop_low
             fits = self.plots.get("fits") or {}
             # A fit range copied from another trial counts from the end of the initial drop: put
-            # it on this trial's drop, found on the object of that kind that drops most
+            # it on this trial's drop, found on the object of that kind that drops most. With no plot
+            # open it waits for one; and nothing is imported before then: the plots' libraries
+            # (matplotlib, scipy) took 2.4 s of every start, with the window frozen
             for kind, fit in fits.items():
-                if fit.get("from_low"):
+                if fit.get("from_low") and self.plot_windows():
+                    from .analysis import drop_low
                     lows = [drop_low(w.fit_panel.t, w.fit_panel.y) for w in self.plot_windows()
                             if w.kind == kind and w.fit_panel is not None]
                     lows = [low for low in lows if low is not None]

@@ -8,6 +8,7 @@ recorded at its capture rate, so measurements use the capture rate.
 
 import os
 import subprocess
+import threading
 
 import harness as h  # noqa: F401  (sets up Qt before PySide6 is imported)
 
@@ -91,9 +92,59 @@ def test_probe_real_clip() -> None:
             probe_timing(os.path.join(h.WORK, "missing.mp4")) is None)
 
 
+def test_the_probe_runs_beside_the_first_frame_read() -> None:
+    """Opening a video asks ffmpeg for its timing, a process of about 60 ms. It starts before the source's first frame is
+    read, so the two take their time together: a trial's open took the probe's time longer, for each trial of a start."""
+    from phystrack_qt import video_source
+    from test_tracking import make_clip
+    h.app()
+    cache, clip = os.path.join(h.WORK, "cache"), make_clip()
+    first = video_source.VideoSource(cache)
+    first.load(clip)
+    h.pump(lambda: first.has_proxy, 60)   # With the proxy made, loading again starts no worker of its own
+    os.remove(video_source.info_path(cache, clip))   # (and with the note gone, the load reads the file, as a first one does)
+
+    started = threading.Event()
+    seen = {}
+    expected = Timing(25.0, 100.0)
+
+    def probe(path: str) -> Timing:
+        started.set()
+        return expected
+
+    class Reader(video_source.VideoReader):
+        def read(self, index=None):
+            if "probe_started" not in seen:   # The first read is the source's first frame, for its size
+                seen["probe_started"] = started.wait(2.0)
+            return super().read(index)
+
+    real = video_source.probe_timing, video_source.VideoReader
+    video_source.probe_timing, video_source.VideoReader = probe, Reader
+    try:
+        source = video_source.VideoSource(cache)
+        loaded = source.load(clip)
+    finally:
+        video_source.probe_timing, video_source.VideoReader = real
+    h.check("the clip loads", loaded)
+    h.check("the probe has started by the time the first frame is read", seen.get("probe_started") is True,
+            str(seen))
+    h.check("...and its timing is the one the source takes", source.timing == expected, str(source.timing))
+
+    os.remove(video_source.info_path(cache, clip))   # (the load above noted the fake timing)
+    video_source.probe_timing = lambda path: None   # ffmpeg missing or unable: OpenCV's rate stands in
+    try:
+        other = video_source.VideoSource(cache)
+        other.load(clip)
+    finally:
+        video_source.probe_timing = real[0]
+    h.check("without a probe result, the rate is OpenCV's", other.timing is not None
+            and abs(other.timing.container_fps - 30.0) < 1e-6 and other.timing.capture_fps is None, str(other.timing))
+    h.check("...and that stand-in is not noted: ffmpeg may be there next time", video_source.read_info(cache, clip) is None)
+
+
 if __name__ == "__main__":
     for test in (test_slow_motion_report, test_plain_report, test_exact_rates, test_no_video_no_timing,
-                 test_measure_fps, test_probe_real_clip):
+                 test_measure_fps, test_probe_real_clip, test_the_probe_runs_beside_the_first_frame_read):
         print(test.__name__)
         test()
     h.finish()

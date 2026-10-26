@@ -11,11 +11,13 @@ import sys
 from PySide6.QtCore import QTimer
 from PySide6.QtWidgets import QApplication
 
-from phystrack_qt import paths, recent, session, windows
+from phystrack_qt import paths, plot_warmup, recent, session, windows
 from phystrack_qt.agent import session as agent_session
 from phystrack_qt.version import __version__
 
-OPEN_AFTER_MS = 250   # The pause between bringing the window forward and opening the first trial
+OPEN_AFTER_MS = 250   # The pause between bringing the window forward and opening the first trial: the window's
+#                       first paint takes about 200 ms of it, the rest is idle time, in which macOS updates the menu bar
+#                       (with 100 ms there was none, and the bar stayed the previous app's until all trials were open)
 OPEN_GAP_MS = 20      # The pause between one trial and the next: the loop idles, so macOS's events get handled
 #                       (a zero delay is only a posted event, which can run again before they are)
 
@@ -92,13 +94,16 @@ def warm_launch() -> None:
 
 def start_at_launch(app: QApplication, window, files: list[str]) -> None:
     """On the event loop's first turn: brings the window to the front, and schedules the opening of the trials
-    (open_trials) after a short pause. Opening a trial takes seconds on this thread (the first one imports
-    scipy), and the event loop does not turn meanwhile: the window cannot paint, and macOS cannot finish
-    bringing the app forward, so its menu bar stays the previous app's until the opening is over. The loop
+    (open_trials) after a short pause. Opening a trial takes about a quarter of a second on this thread
+    (more for a long video or a slow disk), and the event loop does not turn meanwhile: the window cannot
+    paint, and macOS cannot finish bringing the app forward, so its menu bar stays the previous app's until
+    the opening is over (it did, for up to 17 s, when a trial's opening also loaded matplotlib and scipy). The loop
     gets a pause first, and a turn between the trials. The session record is held until the last trial is
-    open, so a quit part-way does not shrink it."""
+    open, so a quit part-way does not shrink it; and so is the plots' warm-up thread, which would take the
+    interpreter's lock from the trials (plot_warmup.py)."""
     windows.focus(window)
     session.hold()
+    plot_warmup.hold()
     QTimer.singleShot(OPEN_AFTER_MS, lambda: open_trials(app, window, startup_files(files), 0))
 
 
@@ -108,10 +113,10 @@ def open_trials(app: QApplication, window, trials: list[str], k: int) -> None:
     session record is released, and the agent tools and the assistant start. Stops the assistant's model
     runner when the app quits (not when a window closes).
 
-    QUICK-AND-DIRTY: a trial still opens on this thread, so the window is frozen while it does: about 3.5 s
-    for the first on the Intel MacBook Pro (2.6 s of it importing scipy for the fits; the proxy is made in
-    a thread already), about 0.4 s for each further one. The robust version imports those libraries in the
-    background before the first trial opens, so the window stays alive meanwhile."""
+    QUICK-AND-DIRTY: a trial still opens on this thread, so the window is frozen while it does: about 0.25 s
+    each on the Intel MacBook Pro (the source opened and its first frame read, the proxy opened, the saved
+    frame shown; the proxy, when there is none yet, is made in a thread already). The robust version reads
+    the video on a worker thread and hands the frames to the window, which then never freezes."""
     if k < len(trials):
         try:
             target = window if k == 0 else windows.new_window()
@@ -123,6 +128,7 @@ def open_trials(app: QApplication, window, trials: list[str], k: int) -> None:
             QTimer.singleShot(OPEN_GAP_MS, lambda: open_trials(app, window, trials, k + 1))
         return
     session.release()
+    plot_warmup.release()
     # The agent tools, for the MCP shim and ptx.py (docs/AGENT_PLAN.md); PHYSTRACK_BRIDGE=0 turns off
     if os.environ.get("PHYSTRACK_BRIDGE", "1") != "0":
         from phystrack_qt.agent import bridge

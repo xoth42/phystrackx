@@ -122,7 +122,8 @@ def test_same_video_in_two_tabs_at_once() -> None:
     h.pump(lambda: failures or all(s.has_proxy for s in sources), timeout=60)
     h.check("both tabs get the proxy, with no failure", not failures and all(s.has_proxy for s in sources),
             str(failures))
-    h.check("...and one proxy file is left in the cache", len(os.listdir(cache)) == 1, str(os.listdir(cache)))
+    left = [name for name in os.listdir(cache) if not name.endswith("_info.json")]   # (the video's note is beside its proxy)
+    h.check("...and one proxy file is left in the cache", len(left) == 1 and left[0].endswith("_proxy.mp4"), str(os.listdir(cache)))
 
 
 def test_file_menu_groups() -> None:

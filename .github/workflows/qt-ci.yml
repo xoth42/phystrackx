@@ -1,8 +1,9 @@
 # Qt app: runs the installers the way a user would, then the tests, on Windows, macOS and Linux.
 # The installers are at the repo root: install.sh (macOS and Linux) and install.bat (Windows). Each runs
 # twice, to show that a second run replaces the first cleanly. The uninstaller runs last and must leave
-# nothing behind. Runs on every change to the app, the installers or the parent code it uses.
-# Local equivalent: sh install.sh && cd qt && uv run python build.py test
+# nothing behind. Runs on every change to the app, the installers or the parent code it uses. After the tests it
+# measures how fast the app is on each OS (speed report, informational).
+# Local equivalent: sh install.sh && cd qt && uv run python build.py test && uv run python tests/perf_report.py
 name: Qt app CI
 
 on:
@@ -105,6 +106,24 @@ jobs:
         env:
           PYTHONUTF8: "1"   # Windows prints the app's text (▸ and the like) in UTF-8
         run: uv run python build.py test
+
+      # How fast the app is on this OS (qt/tests/perf_report.py): the table is on the run's summary page, and the
+      # numbers are kept as an artifact. Informational: a slow number or a broken measurement never fails the build.
+      - name: Speed report
+        if: ${{ !cancelled() }}
+        continue-on-error: true
+        env:
+          PYTHONUTF8: "1"
+        run: uv run python tests/perf_report.py --json "../perf/perf-${RUNNER_OS}.json" --summary "$GITHUB_STEP_SUMMARY"
+
+      - name: Keep the speed numbers
+        if: ${{ !cancelled() }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: perf-${{ runner.os }}
+          path: perf/perf-${{ runner.os }}.json
+          if-no-files-found: ignore
+          retention-days: 90
 
       - name: Uninstall (leaves nothing behind)
         working-directory: .
