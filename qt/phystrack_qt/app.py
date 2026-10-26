@@ -15,6 +15,10 @@ from phystrack_qt import paths, recent, session, windows
 from phystrack_qt.agent import session as agent_session
 from phystrack_qt.version import __version__
 
+OPEN_AFTER_MS = 250   # The pause between bringing the window forward and opening the first trial
+OPEN_GAP_MS = 20      # The pause between one trial and the next: the loop idles, so macOS's events get handled
+#                       (a zero delay is only a posted event, which can run again before they are)
+
 
 def stop_on_ctrl_c(app: QApplication) -> QTimer:
     """Ctrl-C quits the app. Qt's event loop runs in C++, where Python's own Ctrl-C handler never
@@ -57,7 +61,8 @@ def run(files: list[str]) -> None:
     # The first trial, in a tab of the first window
     window = windows.new_window(cache_dir=os.environ.get("PHYSTRACK_QT_CACHE") or paths.cache_dir())
     # Nothing else runs before the event loop: until it runs the window is not painted, and macOS does not
-    # bring the app forward. The trials, the bridge and the assistant start on its first turn instead.
+    # bring the app forward. The window is brought forward on its first turn; the trials, the bridge and the
+    # assistant follow (start_at_launch, open_trials).
     QTimer.singleShot(0, lambda: start_at_launch(app, window, files))
     sys.exit(app.exec())
 
@@ -86,16 +91,37 @@ def warm_launch() -> None:
 
 
 def start_at_launch(app: QApplication, window, files: list[str]) -> None:
-    """On the event loop's first turn: brings the window to the front, opens the trials, then starts the
-    agent tools and the assistant. Stops the assistant's model runner when the app quits (not when a
-    window closes)."""
+    """On the event loop's first turn: brings the window to the front, and schedules the opening of the trials
+    (open_trials) after a short pause. Opening a trial decodes video on this thread, for seconds, and the event
+    loop does not turn meanwhile: the window cannot paint, and macOS cannot finish bringing the app forward,
+    so its menu bar stays the previous app's until the opening is over. The loop gets a pause first, and a
+    turn between the trials. The session record is held until the last trial is open, so a quit part-way
+    does not shrink it."""
     windows.focus(window)
-    for k, path in enumerate(startup_files(files)):
-        target = window if k == 0 else windows.new_window()
-        if path.endswith(".phystrack"):
-            target.open_project_file(path)
-        else:
-            target.load_video(path)
+    session.hold()
+    QTimer.singleShot(OPEN_AFTER_MS, lambda: open_trials(app, window, startup_files(files), 0))
+
+
+def open_trials(app: QApplication, window, trials: list[str], k: int) -> None:
+    """Opens trial k of `trials` (the first in `window`, each further one in a tab of its own), and schedules
+    the next after a short pause, even if this one failed (Qt prints the failure). After the last: the
+    session record is released, and the agent tools and the assistant start. Stops the assistant's model
+    runner when the app quits (not when a window closes).
+
+    QUICK-AND-DIRTY: a trial still opens on this thread, so the window is frozen while it does (seconds for a
+    long video). The robust version decodes and builds the proxy in a worker, and shows the trial when it is
+    ready."""
+    if k < len(trials):
+        try:
+            target = window if k == 0 else windows.new_window()
+            if trials[k].endswith(".phystrack"):
+                target.open_project_file(trials[k])
+            else:
+                target.load_video(trials[k])
+        finally:
+            QTimer.singleShot(OPEN_GAP_MS, lambda: open_trials(app, window, trials, k + 1))
+        return
+    session.release()
     # The agent tools, for the MCP shim and ptx.py (docs/AGENT_PLAN.md); PHYSTRACK_BRIDGE=0 turns off
     if os.environ.get("PHYSTRACK_BRIDGE", "1") != "0":
         from phystrack_qt.agent import bridge

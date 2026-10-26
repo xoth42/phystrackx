@@ -19,7 +19,15 @@ when `APPIMAGETOOL` points at the appimagetool). The Windows installer needs Inn
 ## Parts
 
 - `packaging/phystrackx.spec`: the PyInstaller recipe. One folder, not one file: the app starts
-  faster (nothing is unpacked at each start), and signing works on each file.
+  faster (nothing is unpacked at each start), and signing works on each file. Its macOS `info_plist`
+  sets what PyInstaller leaves out or gets wrong for a window app: `LSBackgroundOnly` false (else the
+  app never comes to the front) and `NSSupportsAutomaticGraphicsSwitching` true. Without that one, a
+  MacBook Pro with two GPUs counts the app as needing the discrete GPU and switches to it while the app
+  starts; the display change can leave the app without a menu bar (the previous app's menus stay on
+  screen). Check a bundle with `/usr/libexec/PlistBuddy -c 'Print :NSSupportsAutomaticGraphicsSwitching'
+  PhysTrackX.app/Contents/Info.plist`, and a launch with
+  `log show --last 1m --info --debug --predicate 'process == "kernel" AND eventMessage CONTAINS "AGC::"'`
+  (the app should be logged as `mux-aware` only, with no `Switching from IGD to PEG`).
 - `packaging/entry.py`: what the packaged program runs (the same as `phystrackx`). On Windows, which has
   no console, its output goes to `%LOCALAPPDATA%\PhysTrackX\Logs\phystrackx.log`.
 - `packaging/PhysTrackX.iss`: the Windows installer (Inno Setup). Per user, so no administrator prompt; it

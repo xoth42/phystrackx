@@ -78,6 +78,32 @@ def test_a_window_closed_during_use_drops_out() -> None:
     h.pump(lambda: False, 0.1)
 
 
+def test_a_hold_keeps_the_record_until_released() -> None:
+    """The start reopens the last session's trials one by one (app.open_trials). Until the last is open the
+    record on disk stays the whole session, so a quit part-way does not shrink it."""
+    reset()
+    first = h.window()
+    first.load_video(make_clip())
+    whole = record()
+    session.hold()
+    second = h.window()
+    second.load_video(make_clip())
+    h.check("while held, opening a trial does not rewrite the record", record() == whole, str(record()))
+    session.release()
+    h.check("released, the record holds every trial", len(record()) == 2, str(record()))
+    first._dirty = second._dirty = False
+    first.close()
+    second.close()
+    h.pump(lambda: False, 0.1)
+
+
+def test_a_hold_with_nothing_to_write_writes_nothing() -> None:
+    reset()
+    session.hold()
+    session.release()
+    h.check("a hold and release with no change leave no record", not os.path.exists(session.session_file()))
+
+
 def test_missing_files_are_skipped() -> None:
     reset()
     os.makedirs(os.path.dirname(session.session_file()), exist_ok=True)
@@ -106,6 +132,7 @@ if __name__ == "__main__":
     h.app()
     for test in (test_window_is_recorded_by_video_then_project, test_an_empty_window_is_not_recorded,
                  test_quitting_with_two_windows_keeps_both, test_a_window_closed_during_use_drops_out,
+                 test_a_hold_keeps_the_record_until_released, test_a_hold_with_nothing_to_write_writes_nothing,
                  test_missing_files_are_skipped, test_startup_choices):
         print(test.__name__)
         test()

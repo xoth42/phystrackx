@@ -7,6 +7,9 @@ A window that is closed is dropped from the record on a zero-delay timer, not at
 every window in one pass, and the timer does not run before the app exits, so all of them stay in the
 record. A single window closed during use drops out straight away.
 
+While the start reopens the last session's windows one by one (app.open_trials) the record is held, not
+written: a quit before the last is open leaves the file as it was, the whole last session.
+
 The file is session-qt.json in the same folder as the recent projects (recent.py); PHYSTRACK_QT_HOME
 moves it (the tests use it).
 """
@@ -22,6 +25,25 @@ from phystrack_qt import recent
 logger = logging.getLogger(__name__)
 
 _entries: dict[str, dict] = {}   # window id -> {"project": path or None, "video": path}, in opening order
+_held = False        # The record is kept in memory, not written (hold)
+_unwritten = False   # A write came due while it was held
+
+
+def hold() -> None:
+    """Keeps the record from being written until release(). The start reopens the last session's windows one
+    by one (app.open_trials), and a quit before the last would otherwise save the session with only the
+    windows opened so far."""
+    global _held
+    _held = True
+
+
+def release() -> None:
+    """Lets the record be written again, and writes it if a write came due meanwhile."""
+    global _held, _unwritten
+    _held = False
+    if _unwritten:
+        _unwritten = False
+        _write()
 
 
 def session_file() -> str:
@@ -48,7 +70,12 @@ def _drop(wid: str) -> None:
 
 
 def _write() -> None:
-    """Writes the record atomically, so a failed write never leaves a half-written file."""
+    """Writes the record atomically, so a failed write never leaves a half-written file. While held, it only
+    notes that a write is due."""
+    global _unwritten
+    if _held:
+        _unwritten = True
+        return
     path = session_file()
     tmp = path + ".part"
     try:

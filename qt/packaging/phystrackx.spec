@@ -86,6 +86,10 @@ if MACOS:
             # The console above makes PyInstaller set LSBackgroundOnly; macOS then never makes the app
             # frontmost, so its keys go to the app behind it. A window app must be a normal app.
             "LSBackgroundOnly": False,
+            # Without this a Mac with two GPUs counts the app as needing the discrete one, and switches to it
+            # while the app is still starting. The display change that follows can leave the app without a
+            # menu bar: the previous app's menus stay on screen. (Qt's own Info.plist template sets it too.)
+            "NSSupportsAutomaticGraphicsSwitching": True,
             "LSMinimumSystemVersion": "11.0",
         },
     )
