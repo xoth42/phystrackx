@@ -227,7 +227,7 @@ class ChatPanel(QWidget):
     # --- Models ------------------------------------------------------------------------------------
     def _load_models(self) -> None:
         try:
-            self._models_ready.emit(self.session.llm.models())
+            self._models_ready.emit(self.session.llm.available_models())
         except Exception:   # The runner is not up yet: it starts with the first request
             pass
 

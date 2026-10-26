@@ -94,26 +94,11 @@ step "Installing the phystrackx command, with the versions in uv.lock (the ones 
     'uv export --frozen --no-hashes --no-emit-project > build/constraints.txt &&
      uv tool install --python 3.12 --force --constraints build/constraints.txt .'
 
-# Fix Qt6 library path: create a wrapper that sets LD_LIBRARY_PATH before Python loads
-BIN=$(uv tool dir --bin)
-PYTHON_BIN="$BIN/phystrackx"
-if [ -f "$PYTHON_BIN" ]; then
-    mv "$PYTHON_BIN" "$PYTHON_BIN.real"
-    cat > "$PYTHON_BIN" << 'WRAPPER_EOF'
-#!/bin/sh
-# Set LD_LIBRARY_PATH to use PySide6's bundled Qt6 libraries
-PYSIDE_LIB=$(python3.12 -c "import sysconfig, os; print(os.path.join(sysconfig.get_path('purelib'), 'PySide6', 'lib'))" 2>/dev/null)
-if [ -d "$PYSIDE_LIB" ]; then
-    export LD_LIBRARY_PATH="$PYSIDE_LIB:$LD_LIBRARY_PATH"
-fi
-exec "$(dirname "$0")/phystrackx.real" "$@"
-WRAPPER_EOF
-    chmod +x "$PYTHON_BIN"
-fi
-
 if [ "$APP" = 1 ]; then
     step "Building and installing PhysTrackX.app in /Applications" uv run --group build python build.py install
 fi
+
+BIN=$(uv tool dir --bin)
 if [ "$FANCY" = 1 ]; then printf '\033[1;32mDone.\033[0m '; else echo "== Done"; fi
 "$BIN/phystrackx" --version
 case ":$PATH:" in

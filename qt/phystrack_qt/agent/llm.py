@@ -21,6 +21,8 @@ import os
 import urllib.error
 import urllib.request
 
+from . import ollama_models
+
 DEFAULT_URL = "http://127.0.0.1:11434/v1"   # Ollama
 DEFAULT_MODEL = "qwen3:4b-instruct"
 
@@ -86,7 +88,15 @@ class LLM:
     def models(self) -> list[str]:
         """The runner's models (raises OSError if it cannot be reached)."""
         with self._open("/models", timeout=3.0) as response:
-            return sorted(m["id"] for m in json.loads(response.read()).get("data", []))
+            return sorted(m["id"] for m in json.loads(response.read()).get("data") or [])   # Ollama sends null with no models
+
+    def available_models(self) -> list[str]:
+        """What the model list shows: the runner's models, and for Ollama also those on disk in any of its
+        folders (models() stays the runner's own list, which says what it can answer with now)."""
+        names = set(self.models())
+        if self.is_ollama:
+            names.update(ollama_models.on_disk())
+        return sorted(names)
 
     def chat(self, messages: list, tools: list, on_text=None, cancelled=None,
              max_tokens: int = 400, on_reasoning=None) -> dict:
