@@ -136,6 +136,12 @@ AppImages need no signing to run. GPG-signing the release files is optional (not
 
 - **macOS builds are for the Mac's own chip.** CI's `macos-latest` is Apple silicon, so its package
   is arm64 only. A universal build (both chips) is a later step.
+- **Start-up time.** `packaging/entry.py` keeps matplotlib's font cache in the user's cache folder
+  (PyInstaller's hook would rebuild it at every start: about 10 s with the window frozen). The install's
+  hidden launch builds it, so a first start after `install.sh` is as fast as later ones; a `.dmg`
+  drag-install builds it at its first start, once. What is left: the first trial of a start freezes the
+  window about 3.5 s on the Intel MacBook Pro, 2.6 s of it importing scipy (`open_trials` in `app.py`
+  says how to avoid that).
 - **Size.** The app is about 470 MB, most of it Qt. Trimming the unused Qt modules is a later step.
   ffmpeg is currently bundled twice (in `Frameworks` and `Resources`).
 - **Windows installer, not yet run.** The release workflow builds and signs `PhysTrackX-Setup.exe`, but it

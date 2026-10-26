@@ -92,11 +92,11 @@ def warm_launch() -> None:
 
 def start_at_launch(app: QApplication, window, files: list[str]) -> None:
     """On the event loop's first turn: brings the window to the front, and schedules the opening of the trials
-    (open_trials) after a short pause. Opening a trial decodes video on this thread, for seconds, and the event
-    loop does not turn meanwhile: the window cannot paint, and macOS cannot finish bringing the app forward,
-    so its menu bar stays the previous app's until the opening is over. The loop gets a pause first, and a
-    turn between the trials. The session record is held until the last trial is open, so a quit part-way
-    does not shrink it."""
+    (open_trials) after a short pause. Opening a trial takes seconds on this thread (the first one imports
+    scipy), and the event loop does not turn meanwhile: the window cannot paint, and macOS cannot finish
+    bringing the app forward, so its menu bar stays the previous app's until the opening is over. The loop
+    gets a pause first, and a turn between the trials. The session record is held until the last trial is
+    open, so a quit part-way does not shrink it."""
     windows.focus(window)
     session.hold()
     QTimer.singleShot(OPEN_AFTER_MS, lambda: open_trials(app, window, startup_files(files), 0))
@@ -108,9 +108,10 @@ def open_trials(app: QApplication, window, trials: list[str], k: int) -> None:
     session record is released, and the agent tools and the assistant start. Stops the assistant's model
     runner when the app quits (not when a window closes).
 
-    QUICK-AND-DIRTY: a trial still opens on this thread, so the window is frozen while it does (seconds for a
-    long video). The robust version decodes and builds the proxy in a worker, and shows the trial when it is
-    ready."""
+    QUICK-AND-DIRTY: a trial still opens on this thread, so the window is frozen while it does: about 3.5 s
+    for the first on the Intel MacBook Pro (2.6 s of it importing scipy for the fits; the proxy is made in
+    a thread already), about 0.4 s for each further one. The robust version imports those libraries in the
+    background before the first trial opens, so the window stays alive meanwhile."""
     if k < len(trials):
         try:
             target = window if k == 0 else windows.new_window()
