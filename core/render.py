@@ -76,14 +76,15 @@ def _save_gif(frames: list, out: str, ms: int) -> str:
 
 
 def overview_gif(project: str, out: str, width: int = 300, step: int = 4, fps: float = 120.0,
-                 speed: float = 1.0) -> str:
+                 speed: float = 1.0, lead: float = 1.0) -> str:
     """
     The whole video as a GIF, every `step`-th frame, `width` pixels wide.
 
     A bar under the picture is the timeline: the trim is the green span, the playhead the white
     line. The banner says IN TRIM / OUTSIDE TRIM with the frame and time. Each tracked frame shows
     the selection box (green), and the marked frame its box in red. fps is the recording rate
-    (time stamps); speed scales playback against real time (1 = real time at fps).
+    (time stamps); speed scales playback against real time (1 = real time at fps). The clip runs
+    from `lead` seconds before the trim to the trim's end (lead=None: the whole video).
     """
     p = load_project(project)
     n = frame_count(p["video"])
@@ -92,7 +93,8 @@ def overview_gif(project: str, out: str, width: int = 300, step: int = 4, fps: f
     h = round(ph * scale)
     bar = 18
     frames = []
-    for i, frame in _frames(p["video"], p["picture"], range(0, n, step)):
+    first, last = (0, n - 1) if lead is None else (max(0, t0 - round(lead * fps)), min(t1, n - 1))
+    for i, frame in _frames(p["video"], p["picture"], range(first, last + 1, step)):
         img = cv2.resize(frame, (width, h), interpolation=cv2.INTER_AREA)
         inside = t0 <= i <= t1
         for obj in p["objects"]:

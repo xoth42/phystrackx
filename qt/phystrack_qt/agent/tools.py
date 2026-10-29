@@ -772,6 +772,25 @@ def tool_set_object_selection(win, n: int, box=None, frame=None):
     return out
 
 
+@_tool("delete_points")
+def tool_delete_points(win, n: int, start: int, end: int | None = None):
+    """Drops object n's tracked points on frames start..end (inclusive; end defaults to start),
+    e.g. where the ball is hidden behind the stopper. They become gaps (as if lost), so plots, fits
+    and exports leave them out; revert undoes it."""
+    obj = next((o for o in win.objects if o.number == n), None)
+    if obj is None:
+        raise ToolError(f"no object {n}; objects: {[o.number for o in win.objects]}")
+    if win.job is not None:
+        raise ToolError("tracking: wait for it to end")
+    end = start if end is None else end
+    frames = [f for f in obj.boxes if start <= f <= end and obj.boxes[f] is not None]
+    for f in frames:
+        obj.boxes[f] = None
+    obj.draw_trail()
+    win._after_objects_change(f"Deleted {len(frames)} points of object {n} ({start}..{end})")
+    return {"deleted": len(frames), "frames": [start, end], "ev": _ev(win)}
+
+
 @_tool("remove")
 def tool_remove(win, n: int):
     obj = next((o for o in win.objects if o.number == n), None)
